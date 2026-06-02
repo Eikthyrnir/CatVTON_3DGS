@@ -1,0 +1,65 @@
+# requirements.txt — consolidated environment for the CatVTON + 3DGS VTON pipeline.
+#
+# Replaces the notebook's entire "CatVTON installation" section: CatVTON's own
+# requirements.txt PLUS the torch 2.4.0 -> 2.5.0 override dance (the uninstall/reinstall
+# cells). Resolves directly to the final pinned versions, so torch 2.4.0 and the
+# bleeding-edge git diffusers are never installed and thrown away.
+#
+# Usage (Colab):
+#   %cd /content
+#   !git clone https://github.com/Zheng-Chong/CatVTON.git
+#   !pip uninstall -y torch torchvision torchaudio xformers torchao
+#   !pip install -r requirements.txt
+#   # >>> then RESTART the runtime once before continuing <<<
+#
+# Why the clone + uninstall + restart are still separate (a requirements file can't do them):
+#   * git clone  : the notebook imports model.cloth_masker / model.pipeline from the repo.
+#   * uninstall  : clears Colab's PREINSTALLED CUDA-variant torch (avoids the +cu121 vs
+#                  +cu124 "looks satisfied, skipped" trap) and removes torchao, whose
+#                  transformers integration crashes on torch 2.5 with `torch.int1`.
+#                  (Having torchao gone here also makes the LoRA-section downgrade of
+#                   transformers to 4.44.2 + the second torchao uninstall unnecessary.)
+#   * restart    : swapping the core torch build requires a fresh Python process.
+
+# PyTorch CUDA 12.4 wheels (everything else still resolves from PyPI)
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+# --- Core DL stack (overrides CatVTON's torch 2.4.0 for py3.12 / xformers compat) ---
+torch==2.5.0
+torchvision==0.20.0
+torchaudio==2.5.0
+xformers==0.0.28.post2
+
+# --- Diffusion / training ---
+diffusers==0.30.3
+transformers==4.46.3            # keep CatVTON's pin (do NOT downgrade to 4.44.2)
+accelerate==1.13.0              # verify this resolves on Colab; CatVTON pinned 0.31.0
+peft>=0.17.0
+huggingface_hub>=0.34.0,<2.0
+
+# --- CatVTON runtime deps (DensePose / SCHP / AutoMasker) ---
+fvcore==0.1.5.post20221221
+cloudpickle==3.0.0
+omegaconf==2.3.0
+pycocotools==2.0.8
+av==12.3.0
+scikit-image==0.24.0
+
+# --- General ---
+matplotlib==3.9.1
+numpy==1.26.4
+opencv_python==4.10.0.84
+pillow==10.3.0
+PyYAML==6.0.1
+scipy==1.13.1
+tqdm==4.66.4
+setuptools==69.0.3              # newer than CatVTON's 51.0.0 -> distutils shim for py3.12, can be 82.0.1
+
+# --- Optional: CatVTON gradio demo UI (skip unless you actually use it) ---
+# gradio==4.41.0
+
+# --- Optional: other notebook stages (uncomment to build one full env up front) ---
+# ultralytics                   # front-view detection (YOLOv8 pose)
+# mediapipe                     # front-view detection (3D pose landmarks)
+# plyfile                       # 3DGS
+# ninja                         # 3DGS submodule builds
