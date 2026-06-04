@@ -788,7 +788,7 @@ def extract_upper_clothes_mask(mask_result):
         return atr_upper
 
 
-def schp_refine_mask(coarse_result, init_automasker_res=None, dilate_size=1, dilate_iter=5, close_ksize=35):
+def schp_refine_mask(coarse_result, init_automasker_res, dilate_size=1, dilate_iter=5, close_ksize=35):
     # --- Phase 2: Fine Mask Refinement ---
     print("Phase 2: Refining Mask from Coarse Result...")
     # Run automasker on the coarse result to get exact boundaries of the new garment
@@ -798,10 +798,8 @@ def schp_refine_mask(coarse_result, init_automasker_res=None, dilate_size=1, dil
     upper_clothes_mask = extract_upper_clothes_mask(fine_mask_result)
 
     # --- Combine with Initial Coarse Mask ---
-    if init_automasker_res is not None:
-        print("  -> Combining with initial coarse mask...")
-        initial_upper_clothes_mask = extract_upper_clothes_mask(init_automasker_res)
-        upper_clothes_mask = cv2.bitwise_or(upper_clothes_mask, initial_upper_clothes_mask)
+    initial_upper_clothes_mask = extract_upper_clothes_mask(init_automasker_res)
+    upper_clothes_mask = cv2.bitwise_or(upper_clothes_mask, initial_upper_clothes_mask)
 
     # --- Fix Holes and Small Artifacts ---
     # 1. Morphological Opening (removes small white artifacts/noise in the background)
@@ -837,7 +835,9 @@ def schp_refine_mask(coarse_result, init_automasker_res=None, dilate_size=1, dil
     refined_mask_np[preserve_mask == 255] = 0
 
     refined_mask = Image.fromarray(refined_mask_np).convert("L")
+
     return refined_mask, [
+        init_automasker_res['mask'].convert("L"),
         Image.fromarray(upper_clothes_mask).convert("L"),
         Image.fromarray(cleaned_mask).convert("L"),
         Image.fromarray(filled_mask).convert("L"),
@@ -927,25 +927,47 @@ def segformer_refine_mask(coarse_result, init_automasker_res=None, dilate_size=1
         Image.fromarray(refined_mask_np).convert("L")
     ]
 
-"""## 2 phase try-on:
-1. low number of steps for try-on with big garment-agnostic mask
-2. generate tight mask basing on coare try-on result from step 1
-3. use tight mask with normal number of steps to produce final try-on
+"""## Single-pass try-on + paste-back
+
+Phase 1 produces an excellent garment using CatVTON's WIDE garment-agnostic mask (the mask the
+model was trained on). A 2nd inpaint pass under a TIGHT mask fails because (a) VTON models are
+out-of-distribution on tight masks, and (b) the original garment left just outside/inside the tight
+mask bleeds in as context -> the new garment desaturates and mixes with the old shirt.
+
+Fix: keep Phase 1's garment and PASTE it back onto the original person inside the garment region
+(union of the new and original upper-clothes segmentation, holes filled). This restores the exact
+original arms / neck / hands / face / background (great for 3DGS consistency) with no quality loss
+and no second diffusion pass. Set final_mode="inpaint" to fall back to the old behaviour.
 """
 
-def two_phase_tryon(person_img, garment_img, automasker, pipeline, mask_refiner_fun, is_ref_pass=True, coarse_steps=50, fine_steps=50, seed=42):
-    # --- Phase 1: Coarse Try-On ---
-    print("Phase 1: Generating Coarse Mask and Try-On...")
-    coarse_mask_result = automasker(person_img)
-    coarse_mask = coarse_mask_result['mask']
-
+def _set_reference_pass(pipeline, is_ref_pass):
     for proc in pipeline.unet.attn_processors.values():
         if isinstance(proc, ReferenceAttentionProcessor):
             proc.is_reference_pass = is_ref_pass
-            if is_ref_pass:
-                proc.clear_bank()
-            else:
-                proc.reset_read_index()
+            proc.clear_bank() if is_ref_pass else proc.reset_read_index()
+
+def paste_back(person_img, tryon_img, garment_mask, feather=11):
+    """Composite the garment region of `tryon_img` onto `person_img`, feathering the seam."""
+    size = person_img.size
+    p = np.array(person_img.convert("RGB")).astype(np.float32)
+    t = np.array(tryon_img.convert("RGB").resize(size)).astype(np.float32)
+    m = np.array(garment_mask.convert("L").resize(size)).astype(np.float32)
+    if feather > 0:
+        k = feather | 1                        # force odd kernel
+        m = cv2.GaussianBlur(m, (k, k), 0)
+    a = (m / 255.0)[..., None]                 # soft alpha in [0, 1]
+    out = (t * a + p * (1.0 - a)).clip(0, 255).astype(np.uint8)
+    return Image.fromarray(out)
+
+def two_phase_tryon(person_img, garment_img, automasker, pipeline, mask_refiner_fun,
+                    is_ref_pass=True, coarse_steps=50, fine_steps=50, seed=42,
+                    final_mode="composite"):
+    # --- Phase 1: Coarse try-on with the WIDE agnostic mask (best garment fidelity) ---
+    print("Phase 1: Coarse mask + try-on...")
+    coarse_mask_result = automasker(person_img)
+    coarse_mask = coarse_mask_result['mask']
+
+    _set_reference_pass(pipeline, is_ref_pass)
 
     generator = torch.Generator(device=device).manual_seed(seed)
     coarse_result = pipeline(
@@ -957,32 +979,29 @@ def two_phase_tryon(person_img, garment_img, automasker, pipeline, mask_refiner_
         generator=generator
     )[0]
 
-    # Pass the initial automasker result along to ensure full coverage of original cloth
+    # --- Tight garment mask = union(new upper-clothes, original upper-clothes), holes filled ---
     refined_mask, masks_inbetween = mask_refiner_fun(coarse_result, init_automasker_res=coarse_mask_result)
 
-    # --- Phase 3: Final Fine Try-On ---
-    print("Phase 3: Final High-Res Try-On with Refined Mask...")
 
-    generator = torch.Generator(device=device).manual_seed(seed)
+    # --- Phase 2: Restore the original body ---
+    if final_mode == "composite":
+        # Paste Phase-1 garment back onto the ORIGINAL person -> no washout, body untouched.
+        print("Phase 2: Paste-back composite (no 2nd diffusion pass).")
+        final_result = paste_back(person_img, coarse_result, refined_mask)
+    else:
+        # Legacy: a 2nd inpaint pass under the tight mask (causes garment desaturation/mixing).
+        print("Phase 2: Legacy tight-mask inpaint pass...")
+        _set_reference_pass(pipeline, is_ref_pass)
+        generator = torch.Generator(device=device).manual_seed(seed)
+        final_result = pipeline(
+            image=person_img,
+            condition_image=garment_img,
+            mask=refined_mask,
+            num_inference_steps=fine_steps,
+            guidance_scale=2.5,
+            generator=generator
+        )[0]
 
-    for proc in pipeline.unet.attn_processors.values():
-        if isinstance(proc, ReferenceAttentionProcessor):
-            proc.is_reference_pass = is_ref_pass
-            if is_ref_pass:
-                proc.clear_bank()
-            else:
-                proc.reset_read_index()
-
-    final_result = pipeline(
-        image=person_img,
-        condition_image=garment_img,
-        mask=refined_mask,
-        num_inference_steps=fine_steps,
-        guidance_scale=2.5,
-        generator=generator
-    )[0]
-
-    # Return all intermediate masks and final results
     return coarse_result, refined_mask, final_result, masks_inbetween
 
 import numpy as np
@@ -1708,8 +1727,6 @@ few images from each partition and sanity-check the printed angle labels. If lab
 scrambled, the culprit is usually the `atan2(x, z)` axis mapping in `calculate_azimuth` or the
 anchor-name match in `shift_angles`.
 """
-
-import matplotlib.pyplot as plt
 
 for view in ["front", "side", "back"]:
     folder = os.path.join(PARTITION_DIR, view)
