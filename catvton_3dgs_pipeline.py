@@ -1552,146 +1552,142 @@ def create_partitions(shifted_angles, source_image_dir, output_dir):
 
 """#### LoRA training function"""
 
-import os
+import os, random
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from PIL.ImageOps import exif_transpose
 from tqdm.auto import tqdm
+import torchvision.transforms as T
 from diffusers import StableDiffusionInpaintPipeline, DDPMScheduler, AutoencoderKL
+from diffusers.optimization import get_scheduler
 from peft import LoraConfig, get_peft_model
 from transformers import CLIPTextModel, CLIPTokenizer
 from accelerate import Accelerator
 
-def train_expert_lora(image_folder, output_dir, view_name,
-                      rank=128, steps=2000, batch_size=1,
-                      model_id="runwayml/stable-diffusion-inpainting"):
-    print(f"\n--- Starting LoRA Training for {view_name.upper()} Expert ---")
+def make_mask(resolution, times=30):
+    """RealFill-style mask (many small boxes). 1 = inpaint region, 0 = keep (context)."""
+    mask = torch.ones(1, resolution, resolution)
+    times = np.random.randint(1, times)
+    min_size, max_size, margin = np.array([0.03, 0.25, 0.01]) * resolution
+    max_size = min(max_size, resolution - margin * 2)
+    for _ in range(times):
+        w = np.random.randint(int(min_size), int(max_size))
+        h = np.random.randint(int(min_size), int(max_size))
+        x = np.random.randint(int(margin), resolution - int(margin) - w + 1)
+        y = np.random.randint(int(margin), resolution - int(margin) - h + 1)
+        mask[:, y:y + h, x:x + w] = 0
+    if random.random() < 0.5:
+        mask = 1 - mask
+    return mask
 
+def train_expert_lora(image_folder, output_dir, view_name,
+                      rank=8, alpha=16, dropout=0.1, steps=1000,
+                      batch_size=4, lr_unet=2e-4, lr_text=4e-5,
+                      lr_warmup=100, resolution=512,
+                      train_text_encoder=False,            # GS-VTON trains it; see note below
+                      model_id="runwayml/stable-diffusion-inpainting"):  # MUST match SDSLoss base
+    print(f"\n--- LoRA training: {view_name.upper()} (rank={rank}, steps={steps}) ---")
     accelerator = Accelerator(mixed_precision="fp16")
     device = accelerator.device
 
-    # Load SD Inpainting Pipeline components, including VAE
-    tokenizer = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
+    tokenizer    = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
     text_encoder = CLIPTextModel.from_pretrained(model_id, subfolder="text_encoder").to(device)
-    vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae").to(device)
-    unet = StableDiffusionInpaintPipeline.from_pretrained(model_id, subfolder="unet").unet.to(device)
-    scheduler = DDPMScheduler.from_pretrained(model_id, subfolder="scheduler")
+    vae          = AutoencoderKL.from_pretrained(model_id, subfolder="vae").to(device)
+    unet         = StableDiffusionInpaintPipeline.from_pretrained(model_id, subfolder="unet").unet.to(device)
+    scheduler    = DDPMScheduler.from_pretrained(model_id, subfolder="scheduler")
+    assert scheduler.config.prediction_type == "epsilon"
 
-    # Freeze base models
-    text_encoder.requires_grad_(False)
     vae.requires_grad_(False)
     unet.requires_grad_(False)
+    text_encoder.requires_grad_(False)
 
-    # Apply PEFT LoRA Config
-    lora_config = LoraConfig(
-        r=rank,
-        lora_alpha=rank,
-        init_lora_weights="gaussian",
-        target_modules=["to_q", "to_k", "to_v", "to_out.0"],
-    )
-    unet = get_peft_model(unet, lora_config)
+    # UNet LoRA (q/k/v/out)
+    unet = get_peft_model(unet, LoraConfig(
+        r=rank, lora_alpha=alpha, lora_dropout=dropout,
+        target_modules=["to_q", "to_k", "to_v", "to_out.0"]))
     unet.train()
 
-    optimizer = torch.optim.AdamW(unet.parameters(), lr=1e-4)
+    param_groups = [{"params": [p for p in unet.parameters() if p.requires_grad], "lr": lr_unet}]
+    if train_text_encoder:
+        # GS-VTON / RealFill also adapts the text encoder. If you enable this, SDSLoss must
+        # additionally load + switch the matching "lora_expert_<view>_text" adapters per view.
+        text_encoder = get_peft_model(text_encoder, LoraConfig(
+            r=rank, lora_alpha=alpha, lora_dropout=dropout,
+            target_modules=["k_proj", "q_proj", "v_proj", "out_proj"]))
+        text_encoder.train()
+        param_groups.append({"params": [p for p in text_encoder.parameters() if p.requires_grad], "lr": lr_text})
 
-    # Dataloader
-    image_paths = [os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    if not image_paths:
-        print(f"No images found for {view_name}. Skipping.")
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=1e-2)
+    lr_sched  = get_scheduler("constant_with_warmup", optimizer=optimizer,
+                              num_warmup_steps=lr_warmup, num_training_steps=steps)
+
+    # Load training images once
+    paths = [os.path.join(image_folder, f) for f in os.listdir(image_folder)
+             if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    if not paths:
+        print(f"No images for {view_name}. Skipping.")
         return []
+    print(f"{len(paths)} training images.")
+    imgs = [exif_transpose(Image.open(p)).convert("RGB") for p in paths]
 
-    # PRE-COMPUTE LATENTS AND WEIGHTS TO SPEED UP TRAINING
-    print(f"Pre-computing latents for {len(image_paths)} images...")
-    cached_data = []
-    for img_path in image_paths:
-        img = Image.open(img_path).convert("RGB").resize((512, 512))
-        # Normalize to [-1, 1]
-        clean_images = (torch.tensor(np.array(img)).float() / 127.5 - 1.0).permute(2, 0, 1).unsqueeze(0).to(device)
+    aug = T.Compose([
+        T.RandomResizedCrop(resolution, scale=(0.9, 1.0), ratio=(1.0, 1.0)),
+        T.ToTensor(),                 # [0, 1]
+        T.Normalize([0.5], [0.5]),    # -> [-1, 1]
+    ])
 
-        with torch.no_grad():
-            latents = vae.encode(clean_images).latent_dist.sample()
-            latents = latents * vae.config.scaling_factor
-
-        # 1. Create a binary weight mask where the original image is NOT black
-        pixel_weight = (clean_images > -0.9).float()
-        # 2. Downsample weight mask to match latent space
-        latent_weight = F.interpolate(pixel_weight, size=latents.shape[2:], mode="bilinear", align_corners=False)
-        # 3. Collapse RGB to single channel
-        latent_weight = latent_weight.max(dim=1, keepdim=True)[0]
-
-        cached_data.append((latents, latent_weight))
-
-    def get_batch(bsz):
-        # Randomly sample a batch of images from cached data
-        indices = np.random.choice(len(cached_data), size=bsz, replace=True)
-        batch_latents = torch.cat([cached_data[i][0] for i in indices], dim=0)
-        batch_weights = torch.cat([cached_data[i][1] for i in indices], dim=0)
-        return batch_latents, batch_weights
-
-    # Prompt definition
     prompt = f"a photo of a {view_name} view person wearing a garment"
-    text_input = tokenizer(prompt, padding="max_length", max_length=tokenizer.model_max_length, truncation=True, return_tensors="pt")
-    text_embeddings = text_encoder(text_input.input_ids.to(device))[0]
 
-    unet, optimizer = accelerator.prepare(unet, optimizer)
+    unet, text_encoder, optimizer = accelerator.prepare(unet, text_encoder, optimizer)
+
+    def encode_prompt(use_empty):
+        txt = "" if use_empty else prompt
+        ids = tokenizer(txt, padding="max_length", truncation=True,
+                        max_length=tokenizer.model_max_length, return_tensors="pt").input_ids.to(device)
+        if train_text_encoder:
+            return text_encoder(ids)[0]
+        with torch.no_grad():
+            return text_encoder(ids)[0]
 
     losses = []
     for step in tqdm(range(steps), desc=f"Training {view_name}"):
         optimizer.zero_grad()
+        idx = np.random.choice(len(imgs), size=batch_size, replace=True)
+        pixels = torch.stack([aug(imgs[i]) for i in idx]).to(device)                          # [B,3,H,W] in [-1,1]
+        masks  = torch.stack([make_mask(resolution) for _ in range(batch_size)]).to(device)   # [B,1,H,W]
 
-        latents, latent_weight = get_batch(batch_size)
+        # --- CORRECT inpainting conditioning: apply mask in PIXEL space, THEN encode ---
+        masked_pixels = pixels * (masks < 0.5)
+        with torch.no_grad():
+            latents    = vae.encode(pixels).latent_dist.sample()        * vae.config.scaling_factor
+            masked_lat = vae.encode(masked_pixels).latent_dist.sample() * vae.config.scaling_factor
+        masks_lat = F.interpolate(masks, size=latents.shape[2:])          # mask -> latent resolution
 
-        # Add noise to latents
         noise = torch.randn_like(latents)
-        bsz = latents.shape[0]
-        timesteps = torch.randint(0, scheduler.config.num_train_timesteps, (bsz,), device=device).long()
-        noisy_latents = scheduler.add_noise(latents, noise, timesteps)
+        t = torch.randint(0, scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
+        noisy = scheduler.add_noise(latents, noise, t)
 
-        # --- FIX: Proper Masking for Inpainting ---
-        # 1 = masked (to be inpainted), 0 = unmasked (context)
-        mask = torch.zeros((bsz, 1, latents.shape[2], latents.shape[3]), device=device)
-        for i in range(bsz):
-            if torch.rand(1).item() < 0.25:
-                # 25% chance to mask the entire image
-                mask[i, :, :, :] = 1.0
-            else:
-                # Random rectangular mask covering a significant portion
-                h, w = latents.shape[2], latents.shape[3]
-                mask_h = torch.randint(h // 3, h, (1,)).item()
-                mask_w = torch.randint(w // 3, w, (1,)).item()
-                top = torch.randint(0, h - mask_h + 1, (1,)).item()
-                left = torch.randint(0, w - mask_w + 1, (1,)).item()
-                mask[i, :, top:top+mask_h, left:left+mask_w] = 1.0
+        emb = encode_prompt(use_empty=(random.random() < 0.1))           # 10% CFG (empty-prompt) dropout
+        if emb.shape[0] == 1:
+            emb = emb.repeat(batch_size, 1, 1)
 
-        # Zero out the image latents where the mask is 1
-        masked_image_latents = latents * (1.0 - mask)
+        model_in = torch.cat([noisy, masks_lat, masked_lat], dim=1)      # 4 + 1 + 4 = 9 channels
+        pred = unet(model_in, t, encoder_hidden_states=emb).sample
 
-        # Concatenate noisy_latents, mask, and masked_image_latents (4 + 1 + 4 = 9 channels)
-        latent_model_input = torch.cat([noisy_latents, mask, masked_image_latents], dim=1)
-
-        # Predict noise
-        noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states=text_embeddings.repeat(bsz, 1, 1)).sample
-
-        # 4. Apply the pre-calculated weight to the prediction and the target
-        # This forces the loss to be 0 for all background pixels
-        weighted_noise_pred = noise_pred * latent_weight
-        weighted_noise = noise * latent_weight
-
-        # 5. Calculate MSE only on the weighted pixels
-        loss = F.mse_loss(weighted_noise_pred, weighted_noise, reduction="mean")
-
-        # Backprop
+        loss = F.mse_loss(pred.float(), noise.float())                   # uniform weighting (GS-VTON style)
         accelerator.backward(loss)
-        optimizer.step()
-
+        accelerator.clip_grad_norm_(unet.parameters(), 1.0)
+        optimizer.step(); lr_sched.step()
         losses.append(loss.item())
 
-    # Save the trained LoRA
+    # Save adapters. UNet dir name kept identical so the existing SDSLoss loader still works.
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"lora_expert_{view_name}")
-    accelerator.unwrap_model(unet).save_pretrained(save_path)
-    print(f"Saved {view_name} expert to {save_path}")
+    accelerator.unwrap_model(unet).save_pretrained(os.path.join(output_dir, f"lora_expert_{view_name}"))
+    if train_text_encoder:
+        accelerator.unwrap_model(text_encoder).save_pretrained(os.path.join(output_dir, f"lora_expert_{view_name}_text"))
+    print(f"Saved {view_name} expert to {output_dir}/lora_expert_{view_name}")
     return losses
 
 """### Split images into front/side/back folder to train different expert LoRAs"""
@@ -1705,21 +1701,46 @@ raw_angles = get_colmap_angles(COLMAP_BIN_PATH)
 shifted_angles = shift_angles(raw_angles, anchor_image_name=Path(front_person_path).name)
 partitions = create_partitions(shifted_angles, SOURCE_IMAGES, PARTITION_DIR)
 
+"""### Audit the partition before training
+If front frames leak into the `back/` folder (or vice-versa), no trainer fix will help - the
+experts would be learning mixed views, which shows up as front/back garment blending. Eyeball a
+few images from each partition and sanity-check the printed angle labels. If labels look
+scrambled, the culprit is usually the `atan2(x, z)` axis mapping in `calculate_azimuth` or the
+anchor-name match in `shift_angles`.
+"""
+
+import matplotlib.pyplot as plt
+
+for view in ["front", "side", "back"]:
+    folder = os.path.join(PARTITION_DIR, view)
+    files = sorted(os.listdir(folder))[:4]
+    print(f"\n{view.upper()}  ({len(os.listdir(folder))} imgs): {files}")
+    if files:
+        fig, axes = plt.subplots(1, len(files), figsize=(4 * len(files), 4))
+        for ax, f in zip(np.atleast_1d(axes), files):
+            ax.imshow(Image.open(os.path.join(folder, f)))
+            ax.set_title(f)
+            ax.axis('off')
+        plt.show()
+
 """### Train view-expert LoRAs using SD 1.5"""
 
 LORA_OUTPUT_DIR = "/content/expert_loras"
 
 all_losses = {}
 
-# Train the 3 Experts based on the previously partitioned dataset
-for view in ["front"]: # , "side", "back"
+# Train the 3 view-experts with GS-VTON / RealFill mechanics (rank 8, ~1000 steps).
+# IMPORTANT: model_id must match the base used by SDSLoss below.
+for view in ["front", "side", "back"]:
     view_folder = os.path.join(PARTITION_DIR, view)
-    if os.path.exists(view_folder):
-        # Using batch_size=4 to better utilize GPU and stabilize gradients
-        expert_losses = train_expert_lora(view_folder, LORA_OUTPUT_DIR, view, rank=64, steps=500, batch_size=4)
-        all_losses[view] = expert_losses
+    if os.path.exists(view_folder) and os.listdir(view_folder):
+        all_losses[view] = train_expert_lora(
+            view_folder, LORA_OUTPUT_DIR, view,
+            rank=8, alpha=16, dropout=0.1, steps=1000, batch_size=4,
+            train_text_encoder=False,
+            model_id="runwayml/stable-diffusion-inpainting")
     else:
-        print(f"Skipping {view}: folder {view_folder} does not exist.")
+        print(f"Skipping {view}: empty or missing folder {view_folder}.")
 
 plt.figure(figsize=(10, 6))
 for view, losses in all_losses.items():
@@ -1755,15 +1776,18 @@ all_losses_sd2 = {}
 # Train the Experts using SD 2.0 Inpainting model
 for view in ["front", "side", "back"]: # "front", "side", "back"
     view_folder = os.path.join(PARTITION_DIR, view)
-    if os.path.exists(view_folder):
-        # Pass the SD2 inpainting model_id
+    if os.path.exists(view_folder) and os.listdir(view_folder):
+        # SD 2.0 inpainting is GS-VTON's RealFill base. Keep the same GS-VTON-aligned hyperparams.
         expert_losses = train_expert_lora(
             image_folder=view_folder,
             output_dir=LORA_OUTPUT_DIR_SD2,
             view_name=view,
-            rank=64,
-            steps=5000,
+            rank=8,
+            alpha=16,
+            dropout=0.1,
+            steps=1000,
             batch_size=4,
+            train_text_encoder=False,
             model_id="sd2-community/stable-diffusion-2-inpainting"
         )
         all_losses_sd2[view] = expert_losses
@@ -1793,54 +1817,50 @@ plt.show()
 !gdown 1WWE0im9oGZDjLQqU3bVvtOVsi6Pq27ts -O /content/expert_loras_sd2/expert_loras_sd2_try_on_v1.tar
 !tar -xf /content/expert_loras_sd2/expert_loras_sd2_try_on_v1.tar -C /content/expert_loras_sd2
 
-"""### Generate image via expert LoRAs"""
+"""### Test expert LoRAs the way SDS will use them
+Do NOT judge the LoRA by generating a person from pure noise (black image + full mask) - that is
+out-of-distribution for an inpainting / memorization LoRA and produces misleading "front/back
+mixing". Instead, feed a REAL image from the partition with a partial torso mask and check the
+expert inpaints that view's garment while leaving the rest intact. Keep the prompt's view word
+matched to the expert being loaded.
+"""
 
+import os
 import torch
 from diffusers import StableDiffusionInpaintPipeline
 import matplotlib.pyplot as plt
 from PIL import Image
+import PIL.ImageDraw as ImageDraw
 from peft import PeftModel
 
-# 1. Load the base pipeline
-model_id = "runwayml/stable-diffusion-inpainting"
+view = "back"                                       # <-- the expert you want to test
+model_id = "runwayml/stable-diffusion-inpainting"   # keep == the base you trained with
 # model_id = "sd2-community/stable-diffusion-2-inpainting"
+
 pipe = StableDiffusionInpaintPipeline.from_pretrained(
-    model_id,
-    torch_dtype=torch.float16,
-    safety_checker=None
-).to("cuda")
+    model_id, torch_dtype=torch.float16, safety_checker=None).to("cuda")
+pipe.unet = PeftModel.from_pretrained(pipe.unet, f"/content/expert_loras/lora_expert_{view}")
 
-# 2. Load the LoRA weights (testing the 'front' expert)
-# Use PeftModel to load the adapter directly onto the UNet
-# lora_path = "/content/expert_loras_sd2/lora_expert_front"
-lora_path = "/content/expert_loras/lora_expert_front"
-pipe.unet = PeftModel.from_pretrained(pipe.unet, lora_path)
+# Use a real image from that view's partition
+view_dir = os.path.join(PARTITION_DIR, view)
+test_path = os.path.join(view_dir, sorted(os.listdir(view_dir))[0])
+test_img = Image.open(test_path).convert("RGB").resize((512, 512))
 
-# 3. Setup inputs
-# Create a blank black image to match the training data background
-init_image = Image.new("RGB", (512, 512), "black")
-mask_image = Image.new("L", (512, 512), "white") # 255 = fully masked
+# Partial mask over the torso (where the garment lives). 255 = inpaint.
+mask_image = Image.new("L", (512, 512), 0)
+ImageDraw.Draw(mask_image).rectangle([150, 180, 360, 420], fill=255)
 
-prompt = "a photo of a front view person wearing a garment"
-generator = torch.Generator("cuda").manual_seed(42)
-
-# 4. Generate
-print("Generating test image with 'front' expert LoRA...")
+print(f"Testing '{view}' expert by reconstructing a real {view} view...")
 result = pipe(
-    prompt=prompt,
-    image=init_image,
+    prompt=f"a photo of a {view} view person wearing a garment",
+    image=test_img,
     mask_image=mask_image,
-    num_inference_steps=50, # increased inference steps for quality
-    guidance_scale=7.5,
-    generator=generator
+    num_inference_steps=50,
+    guidance_scale=4.0,
+    generator=torch.Generator("cuda").manual_seed(0)
 ).images[0]
 
-# 5. Display
-plt.figure(figsize=(6, 6))
-plt.imshow(result)
-plt.axis('off')
-plt.title("Generated 'Front' Expert Result")
-plt.show()
+show_multiple_images([test_img, mask_image, result])
 
 """# Use expert LoRAs as loss-source to train 3DGS
 
