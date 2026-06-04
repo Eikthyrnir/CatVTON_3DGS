@@ -929,17 +929,13 @@ def segformer_refine_mask(coarse_result, init_automasker_res=None, dilate_size=1
 Phase 1  - Coarse try-on with CatVTON's WIDE garment-agnostic mask (the mask it was trained on):
            best garment fidelity, but the body (arms / neck) gets regenerated.
 
-Phase 2  - Composite: build the tight cloth mask (union of the new + original upper-clothes, holes
-           filled), carve out body + accessories, and PASTE Phase-1's garment onto the ORIGINAL
-           person. Restores the exact original body, but the garment/skin seam can show a colour or
-           shape discontinuity from blending two images.
+Phase 2  - Composite: build the cloth mask (union of the new + original upper-clothes, holes filled),
+           grow it by `mask_dilate` px to swallow the original-garment strip SCHP under-segments at
+           the hem, and PASTE Phase-1's garment onto the ORIGINAL person.
 
-Phase 3  - Refine: run a 2nd try-on ON THE COMPOSITE with the tight mask. Because the composite no longer contains the original shirt, the diffusion harmonizes the seam and refines the garment WITHOUT mixing in the old cloth (the failure mode of inpainting on the original).
-
-final_mode:
--   "composite_refine" (default) - all 3 phases.
--   "composite" - phases 1-2 only (no refine pass; fastest, may show seams).
--   "inpaint" - legacy: phase 1 + a single tight-mask inpaint on the ORIGINAL person (washes out / mixes with the old garment).
+Phase 3  - Refine: run a 2nd try-on ON THE COMPOSITE with the cloth mask. Because the composite no
+           longer contains the original shirt, the diffusion harmonizes the seam and refines the
+           garment WITHOUT mixing in the old cloth (the failure mode of inpainting on the original).
 """
 
 def _set_reference_pass(pipeline, is_ref_pass):
@@ -962,77 +958,44 @@ def paste_back(person_img, tryon_img, garment_mask, feather=11):
     return Image.fromarray(out)
 
 
-# SCHP ATR classes: 0 bg, 1 hat, 2 hair, 3 sunglasses, 4 upper-clothes, 5 skirt, 6 pants, 7 dress,
-# 8 belt, 9 left-shoe, 10 right-shoe, 11 face, 12 left-leg, 13 right-leg, 14 left-arm, 15 right-arm,
-# 16 bag, 17 scarf.
-def subtract_body_parts(garment_mask, person_schp_atr, tryon_schp_atr=None,
-                        protect_classes=(1, 2, 3, 8, 11, 12, 13, 14, 15, 16, 17), dilate=5):
-    """Remove everything that is NOT the swappable garment from the mask, so those pixels are kept
-    from the ORIGINAL image. Protected ATR classes (default): hat=1, hair=2, sunglasses=3, belt=8,
-    face=11, legs=12/13, arms=14/15, bag=16, scarf=17 -> bare skin + accessories. Sleeves are
-    'upper-clothes' (4), which is NOT protected, so they still receive the new garment. By default we
-    protect only what the INIT (original) parse sees; pass tryon_schp_atr to also protect items the
-    try-on hallucinated (usually unnecessary)."""
-    m = np.array(garment_mask.convert("L"))
-    H, W = m.shape
-
-    def _to_protect(atr):
-        pm = np.isin(np.array(atr), protect_classes).astype(np.uint8) * 255
-        if pm.shape != (H, W):
-            pm = cv2.resize(pm, (W, H), interpolation=cv2.INTER_NEAREST)
-        return pm
-
-    protect = _to_protect(person_schp_atr)
-    if tryon_schp_atr is not None:
-        protect = np.maximum(protect, _to_protect(tryon_schp_atr))
-    if dilate > 0:
-        protect = cv2.dilate(protect, np.ones((dilate, dilate), np.uint8), iterations=1)
-    m[protect > 0] = 0
-    return Image.fromarray(m).convert("L")
+def dilate_mask(mask, px):
+    """Grow a binary mask by `px` pixels (ellipse kernel). Used to swallow the thin strip of the
+    ORIGINAL garment that SCHP under-segments at the sleeve hem, so it is not left in the composite."""
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (px, px))
+    dilated = cv2.dilate(np.array(mask.convert("L")), kernel, iterations=1)
+    return Image.fromarray(dilated).convert("L")
 
 def two_phase_tryon(person_img, garment_img, automasker, pipeline, mask_refiner_fun,
-                    is_ref_pass=True, coarse_steps=50, fine_steps=50, seed=42,
-                    final_mode="composite_refine"):
+                    is_ref_pass=True, coarse_steps=50, fine_steps=50, seed=42, mask_dilate=14):
     # --- Phase 1: Coarse try-on with the WIDE agnostic mask (best garment fidelity) ---
     print("Phase 1: Coarse mask + try-on...")
     coarse_mask_result = automasker(person_img)
     coarse_mask = coarse_mask_result['mask']
 
     _set_reference_pass(pipeline, is_ref_pass)
-
     generator = torch.Generator(device=device).manual_seed(seed)
     coarse_result = pipeline(
-        image=person_img,
-        condition_image=garment_img,
-        mask=coarse_mask,
-        num_inference_steps=coarse_steps,
-        guidance_scale=2.5,
-        generator=generator
+        image=person_img, condition_image=garment_img, mask=coarse_mask,
+        num_inference_steps=coarse_steps, guidance_scale=2.5, generator=generator
     )[0]
 
-    # --- Tight garment mask = union(new upper-clothes, original upper-clothes), holes filled ---
-        # --- Tight garment mask = union(new upper-clothes, original upper-clothes), holes filled ---
-    # Parse the try-on once with SCHP and reuse it for both the refiner and body-part protection.
-    refined_mask, masks_inbetween = mask_refiner_fun(
-        coarse_result, init_automasker_res=coarse_mask_result)
+    # --- Cloth mask = union(new upper-clothes, original upper-clothes), holes filled, then grown ---
+    # The dilation swallows the thin strip of the ORIGINAL garment SCHP under-segments at the hem.
+    refined_mask, masks_inbetween = mask_refiner_fun(coarse_result, init_automasker_res=coarse_mask_result)
+    composite_mask = dilate_mask(refined_mask, mask_dilate)
 
-    # --- Phase 2: Composite Phase-1 garment onto the ORIGINAL person ---
-    # Protect body + accessories (INIT parse only) so ONLY the garment region is replaced.
-    print("Phase 2: Paste-back composite (body + accessories protected)...")
-    composite_mask = subtract_body_parts(refined_mask, person_schp_atr=coarse_mask_result['schp_atr'])
-    composite_mask = refined_mask
+    # --- Phase 2: Paste Phase-1 garment onto the ORIGINAL person ---
+    print("Phase 2: Paste-back composite...")
     composite_result = paste_back(person_img, coarse_result, composite_mask)
 
-    # --- Phase 3: 2nd try-on ON THE COMPOSITE, with the tight cloth mask ---
-    # The composite no longer contains the original shirt, so the diffusion only harmonizes the
-    # mask-edge pixels and refines the garment, WITHOUT mixing in the old garment. We mask with
-    # composite_mask (arms carved out) so the refine pass never regenerates the body again.
-    print("Phase 3: Refine try-on on the composite (tight mask)...")
+    # --- Phase 3: 2nd try-on ON THE COMPOSITE with the cloth mask ---
+    # The composite no longer contains the original shirt, so the diffusion harmonizes the seam and
+    # refines the garment WITHOUT mixing in the old cloth.
+    print("Phase 3: Refine try-on on the composite...")
     _set_reference_pass(pipeline, is_ref_pass)
     generator = torch.Generator(device=device).manual_seed(seed)
     final_result = pipeline(
-        image=composite_result, condition_image=garment_img,
-        mask=composite_mask,
+        image=composite_result, condition_image=garment_img, mask=composite_mask,
         num_inference_steps=fine_steps, guidance_scale=2.5, generator=generator
     )[0]
 
