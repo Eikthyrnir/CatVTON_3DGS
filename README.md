@@ -33,7 +33,7 @@ Pipeline do wirtualnego przymierzania ubrań (Virtual Try-On) z rekonstrukcją 3
 
 ## Instalacja i konfiguracja
 
-### Opcja 1: Google Colab (rekomendowane)
+### Google Colab
 
 1. Otwórz notebook w Colab:
    [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Eikthyrnir/CatVTON_3DGS/blob/main/CatVTON_3DGS_pipeline.ipynb)
@@ -45,24 +45,10 @@ Pipeline do wirtualnego przymierzania ubrań (Virtual Try-On) z rekonstrukcją 3
    - Instaluje zależności
    - Pobiera modele i dane
 
-### Opcja 2: Środowisko lokalne (Linux + CUDA 12.4)
+## Dokumentacja
 
-```bash
-git clone https://github.com/Eikthyrnir/CatVTON_3DGS.git
-cd CatVTON_3DGS
-
-# Klonuj zewnętrzne zależności
-git clone https://github.com/Zheng-Chong/CatVTON.git external/CatVTON
-git clone --recursive https://github.com/camenduru/gaussian-splatting external/gaussian-splatting
-
-# Środowisko Python
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Pobierz dane demonstracyjne
-python scripts/download_data.py
-```
+- [Architektura systemu](docs/architecture.md) - komponenty, przepływ danych, diagram pipeline
+- [Instrukcja użytkownika](docs/usage.md) - jak korzystać z pipeline
 
 ## Uruchomienie demonstracji
 
@@ -123,11 +109,6 @@ Notebook uruchamia się w Colab z GPU. Po instalacji wszystkie komórki powinny 
 - **Artefakty**: Folder `results/` zawiera zapisane krzywe strat i przykładowe rendery
 
 Pełna reprodukcja od zera (try-on + 3DGS + LoRA + SDS) zajmuje ~2-3h na A100.
-
-## Dokumentacja
-
-- [Architektura systemu](docs/architecture.md) - komponenty, przepływ danych, diagram pipeline
-- [Instrukcja użytkownika](docs/usage.md) - jak korzystać z pipeline
 
 ## Struktura repozytorium
 
