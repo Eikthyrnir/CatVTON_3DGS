@@ -138,9 +138,9 @@ System CatVTON + 3DGS realizuje pipeline **multi-view virtual try-on z rekonstru
 
 ## Środowisko uruchomieniowe
 
-- **Google Colab** (rekomendowane) z GPU runtime (T4 minimum, rekomendowane L4 / A100)
+- **Google Colab** (rekomendowane) z GPU runtime (L4 minimum, rekomendowane L4 / A100)
 - CUDA 12.x, Python 3.10+
--  ~20-30 GB przestrzeni dyskowej na modele (HuggingFace cache, COLMAP, checkpointy 3DGS)
+- ~20-30 GB przestrzeni dyskowej na modele (HuggingFace cache, COLMAP, checkpointy 3DGS)
 - **Min. 16 G VRAM**
 
 ## Zmiany względem pierwotnych założeń
