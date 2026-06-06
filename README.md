@@ -71,14 +71,14 @@ Otwórz `CatVTON_3DGS_pipeline.ipynb` i uruchamiaj komórki sekwencyjnie. Notebo
 Sekcja "Download try-on results from Google Drive" w notebooku pozwala pominąć etap generowania try-on i przejść od razu do 3DGS.
 
 ### Orientacyjny czas uruchomienia
-| Etap | Czas (A100) | Czas (L4) |
-|------|-------------|-----------|
-| Instalacja + modele | ~5 min      | ~5 min |
-| Detekcja widoków (30 klatek) | ~2 min      | ~5 min |
-| Try-on wszystkich widoków | ~30 min     | ~90 min |
-| 3DGS training (30k iter) | ~15 min     | ~45 min |
-| Expert LoRA training (3x1000 steps) | ~30-60 min  | ~60 min |
-| SDS-augmented 3DGS (35k iter) | ~40 min     | ~2h |
+| Etap                                | Czas (A100) | Czas (L4) |
+|-------------------------------------|-------------|-----------|
+| Instalacja + modele                 | ~5 min      | ~5 min    |
+| Detekcja widoków (30 klatek)        | ~2 min      | ~5 min    |
+| Try-on wszystkich widoków           | ~30 min     | ~90 min   |
+| 3DGS training (30k iter)            | ~15 min     | ~45 min   |
+| Expert LoRA training (3x1000 steps) | ~30-60 min  | ~60 min   |
+| SDS-augmented 3DGS (35k iter)       | ~40 min     | ~2h       |
 
 ## Oczekiwany wynik
 
@@ -115,7 +115,7 @@ Pełna reprodukcja od zera (try-on + 3DGS + LoRA + SDS) zajmuje ~2-3h na A100.
 
 ```
 ├── configs/                     # konfiguracja pipeline
-│   └── pipeline_config.yaml     # parametry domyślne
+│   └── pipeline_config.yaml     # informacja o urzytych parametrach modeli
 ├── docs/                        # dokumentacja
 │   ├── architecture.md
 │   ├── usage.md
@@ -132,5 +132,5 @@ Pełna reprodukcja od zera (try-on + 3DGS + LoRA + SDS) zajmuje ~2-3h na A100.
 3. **Jakość try-on na widokach bocznych**: CatVTON był trenowany głównie na widokach frontalnych - jakość na bokach/plecach jest niższa. Reference Attention Processor łagodzi ten problem, ale nie eliminuje go całkowicie.
 4. **COLMAP na Colab**: Wymaga kompilacji z GPU support (~10 min). Alternatywnie można użyć gotowych COLMAP danych z Google Drive.
 5. **Zależność od zewnętrznych repozytoriów**: CatVTON i gaussian-splatting są klonowane w runtime.
-6. **SDS Loss**: Implementacja eksperymentalna - wyniki SDS-augmented 3DGS są porównywalne z vanilla 3DGS w obecnej konfiguracji. Wymaga dalszego tuningu hiperparametrów.
-7. **Dane**: Wideo testowe (vadim.MOV) i ubrania są hostowane na Google Drive - wymagany dostęp do internetu.
+6. **SDS Loss**: Implementacja eksperymentalna - na razie wyniki SDS-augmented 3DGS nie dają nam lepszych wyników w porównaniu do vanilla 3DGS w obecnej konfiguracji. Wymaga dalszego tuningu hiperparametrów.
+7. **Dane**: Wideo testowe (vadim.MOV) i ubrania są hostowane na Google Drive

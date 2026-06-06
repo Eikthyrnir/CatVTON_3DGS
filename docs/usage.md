@@ -9,7 +9,12 @@
 ### 2. Wybierz GPU runtime
 - Menu: `Runtime` -> `Change runtime type` -> `A100` (lub L4)
 
-### 3. Uruchom komórki sekwencyjnie
+### 3. Ustaw token HuggingFace (`HF_TOKEN`)
+Część wag jest "gated" i wymaga zalogowania tokenem HuggingFace — bez niego pobieranie modelu zwróci błąd 401/403.
+- Utwórz token *Read*: https://huggingface.co/settings/tokens
+- W Colab: panel **Secrets** (🔑 po lewej) -> dodaj `HF_TOKEN` z włączonym "Notebook access", **lub** w komórce: `from huggingface_hub import login; login()`
+
+### 4. Uruchom komórki sekwencyjnie
 Notebook jest podzielony na sekcje. Każda sekcja ma nagłówek Markdown opisujący co robi.
 
 ---
@@ -111,3 +116,4 @@ Funkcja `show_3DGS_loss_curve(output_dir)` wizualizuje krzywe strat z TensorBoar
 | Różowy overlay na try-on | VAE fix jest już zastosowany (sd-vae-ft-mse) |
 | COLMAP nie znajduje punktów | Sprawdź jakość wideo (ostre klatki, ruch kamery/osoby) |
 | Import errors po instalacji | Zrestartuj runtime (Runtime -> Restart runtime) |
+| Błąd 401/403 lub "gated repo" przy pobieraniu modelu | Ustaw `HF_TOKEN` i zaakceptuj licencję modelu na HuggingFace (patrz Szybki start, krok 3) |
