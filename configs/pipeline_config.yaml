@@ -1,0 +1,70 @@
+  # Pipeline Configuration
+# Default parameters for the CatVTON + 3DGS Virtual Try-On pipeline
+
+# --- Image processing ---
+target_size: [768, 1024]  # (width, height) for try-on images
+
+# --- CatVTON models ---
+models:
+  base_model: "runwayml/stable-diffusion-inpainting"
+  catvton_model: "zhengchong/CatVTON"
+  catvton_version: "mix"
+  vae_model: "stabilityai/sd-vae-ft-mse"
+  depth_model: "depth-anything/Depth-Anything-V2-Small-hf"
+  segformer_model: "mattmdjaga/segformer_b2_clothes"
+  weight_dtype: "float16"
+
+# --- Try-on pipeline ---
+tryon:
+  coarse_steps: 50
+  fine_steps: 50
+  guidance_scale: 2.5
+  guidance_scale_reference: 5.0  # higher for reference (front) pass
+  seed: 42
+  mask_dilate_px: 14
+  mask_refiner: "schp"  # "schp" or "segformer"
+
+# --- View detection ---
+view_detection:
+  method: "mediapipe"  # "mediapipe" or "yolov8_depth"
+  mediapipe_model: "pose_landmarker_heavy.task"
+  visibility_threshold: 0.5
+  width_filter_ratio: 0.6  # reject if width < max_width * this
+
+# --- Video processing ---
+video:
+  fps: 2  # frames per second to extract from input video
+
+# --- 3D Gaussian Splatting ---
+gaussian_splatting:
+  iterations: 30000
+  checkpoint_iterations: [7000, 30000]
+  densify_until_iter: 15000
+  densify_from_iter: 500
+  densification_interval: 100
+
+# --- Expert LoRA training ---
+lora:
+  rank: 8
+  alpha: 16
+  dropout: 0.1
+  steps: 1000
+  batch_size: 4
+  lr_unet: 0.0002
+  lr_text: 0.00004
+  lr_warmup: 100
+  resolution: 512
+  train_text_encoder: false
+  base_model: "runwayml/stable-diffusion-inpainting"
+
+# --- SDS (Score Distillation Sampling) ---
+sds:
+  apply_every_n_iterations: 5
+  weight: 0.1  # SDS loss weight relative to standard loss
+  timestep_range: [20, 980]
+
+# --- Dataset partitioning (COLMAP angles) ---
+partitioning:
+  front_range: [0, 60, 300, 360]  # 0-60 and 300-360
+  back_range: [120, 240]
+  side_range: [60, 120, 240, 300]
