@@ -119,7 +119,7 @@ Pełna reprodukcja od zera (try-on + 3DGS + LoRA + SDS) zajmuje ~2-3h na A100.
 │   ├── usage.md
 ├── src/                         # moduły Python (importowane przez notebook)
 │   ├── CatVTON_3DGS_pipeline.ipynb  # główny notebook (Colab demo)
-├── README.md                    # ten plik
+├── README.md                    # główny plik README
 ├── requirements.txt             # zależności Python
 ```
 
