@@ -1,5 +1,8 @@
-  # Pipeline Configuration
+# Pipeline Configuration
 # Default parameters for the CatVTON + 3DGS Virtual Try-On pipeline
+#
+# NOTE: reference of default parameters. The Colab notebook currently hardcodes these values;
+# editing this file alone does NOT change runtime behaviour (change the values in the notebook).
 
 # --- Image processing ---
 target_size: [768, 1024]  # (width, height) for try-on images

@@ -24,7 +24,7 @@ Pipeline do wirtualnego przymierzania ubrań (Virtual Try-On) z rekonstrukcją 3
 - **Zewnętrzne repozytoria** (klonowane automatycznie):
   - [CatVTON](https://github.com/Zheng-Chong/CatVTON) - model 2D try-on
   - [gaussian-splatting](https://github.com/camenduru/gaussian-splatting) - fork 3DGS dla Colab
-- **Modele HuggingFace** (pobierane automatycznie):
+- **Modele HuggingFace** (pobierane automatycznie; część jest "gated" i wymaga tokenu `HF_TOKEN` — patrz [Google Colab](#google-colab)):
   - `runwayml/stable-diffusion-inpainting`
   - `zhengchong/CatVTON`
   - `stabilityai/sd-vae-ft-mse`
@@ -42,7 +42,17 @@ Pipeline do wirtualnego przymierzania ubrań (Virtual Try-On) z rekonstrukcją 3
    - **IMPORTANT!** chociaż teoretycznie po wielu wprowadzonych przez nas optymizacjach pipeline powinien być uruchomialny na Colab T4 GPU, 
    - W razie potrzeby możemy udostępnić dostęp do PRO wersji COLAB z dostępem do mocniejszych GPU
    - W tej sprawie prosimy pisać bezpośrednio do Ignacy Byshniou (Teams / e-mail: ihnbys@st.amu.edu.pl)
-3. Uruchom komórki sekwencyjnie - notebook automatycznie:
+3. **Skonfiguruj token HuggingFace (`HF_TOKEN`)**
+   Część wag jest "gated" (wymaga zaakceptowania licencji na HuggingFace i zalogowania tokenem) — m.in. `runwayml/stable-diffusion-inpainting`. Bez tokenu pobieranie modelu zwróci błąd 401/403.
+   - Utwórz token (uprawnienia *Read*): https://huggingface.co/settings/tokens
+   - W Colab dodaj go w panelu **Secrets** (ikona 🔑 po lewej) jako `HF_TOKEN` z włączonym "Notebook access", **lub** zaloguj się w komórce:
+     ```python
+     from huggingface_hub import login
+     login()  # wklej token interaktywnie (albo: login(token="hf_..."))
+     ```
+   - Jeśli pojawi się błąd o "gated repo", wejdź na stronę danego modelu na HuggingFace i zaakceptuj warunki licencji.
+
+4. Uruchom komórki sekwencyjnie - notebook automatycznie:
    - Klonuje wymagane repozytoria
    - Instaluje zależności
    - Pobiera modele i dane
@@ -115,7 +125,7 @@ Pełna reprodukcja od zera (try-on + 3DGS + LoRA + SDS) zajmuje ~2-3h na A100.
 
 ```
 ├── configs/                     # konfiguracja pipeline
-│   └── pipeline_config.yaml     # informacja o urzytych parametrach modeli
+│   └── pipeline_config.yaml     # informacja o urzytych parametrach modeli. Note: The Colab notebook currently hardcodes these values
 ├── docs/                        # dokumentacja
 │   ├── architecture.md
 │   ├── usage.md

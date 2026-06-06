@@ -179,7 +179,7 @@ System CatVTON + 3DGS realizuje pipeline **multi-view virtual try-on z rekonstru
 
 ## Modyfikacja parametrów
 
-Plik `configs/pipeline_config.yaml` zawiera wszystkie domyślne parametry. W notebooku można je nadpisać bezpośrednio.
+Plik `configs/pipeline_config.yaml` zawiera wszystkie domyślne parametry. Note: The Colab notebook currently hardcodes these values. W notebooku można je nadpisać bezpośrednio.
 
 ### Najważniejsze parametry do tuningu
 
