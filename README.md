@@ -106,7 +106,6 @@ Notebook uruchamia się w Colab z GPU. Po instalacji wszystkie komórki powinny 
 ### Poziom 3: Weryfikacja wyników
 - **Metryki**: Masked PSNR obliczany w ostatniej sekcji notebooka (porównanie renderu 3DGS z GT)
 - **Loss curves**: `show_3DGS_loss_curve()` wizualizuje krzywe L1/D-SSIM z TensorBoard logów
-- **Artefakty**: Folder `results/` zawiera zapisane krzywe strat i przykładowe rendery
 
 Pełna reprodukcja od zera (try-on + 3DGS + LoRA + SDS) zajmuje ~2-3h na A100.
 
