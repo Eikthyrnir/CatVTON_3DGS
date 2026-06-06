@@ -87,40 +87,40 @@ System CatVTON + 3DGS realizuje pipeline **multi-view virtual try-on z rekonstru
 
 ## Główne komponenty
 
-### 1. View Detection (`src/view_detection/`)
+### 1. View Detection
 - **DensePose** - wstępna klasyfikacja front/back/side na podstawie segmentacji tułowia
 - **MediaPipe 3D Pose** - precyzyjna detekcja najlepszego widoku frontalnego przez minimalizację różnicy głębokości Z ramion
 - **YOLOv8 + Depth Anything V2** - alternatywna metoda (2D pose + monocular depth estimation)
 
-### 2. Reference Attention (`src/reference_attention/`)
+### 2. Reference Attention
 - Custom `ReferenceAttentionProcessor` - modyfikacja self-attention w UNet up_blocks
 - Podczas reference pass: zapisuje K/V features z frontalnego try-on
 - Podczas generation pass: wstrzykuje reference K/V do attention computation
 - Efekt: spójność ubrania między widokami bez dodatkowego treningu
 
-### 3. Try-On Pipeline (`src/tryon/`)
+### 3. Try-On Pipeline
 - **Phase 1 (Coarse)**: CatVTON z szeroką maską agnostyczną - najlepsza wierność ubrania, ale regeneruje ciało
 - **Phase 2 (Composite)**: Wklejenie ubrania z Phase 1 na oryginalne ciało - przywraca anatomię
 - **Phase 3 (Refine)**: Ponowny try-on na composicie z ciasną maską - harmonizuje szwy
 - Mask refinement: SCHP (human parsing) lub SegFormer (clothes segmentation)
 
-### 4. COLMAP Utilities (`src/colmap_utils/`)
+### 4. COLMAP Utilities
 - Parsowanie binary COLMAP output (images.bin)
 - Obliczanie azymutu kamery (kąt obrotu)
 - Anchoring kąta do frontalnego widoku
 - Partycjonowanie dataset na front/side/back
 
-### 5. Expert LoRA Training (`src/lora/`)
+### 5. Expert LoRA Training
 - RealFill-style training z random masks
 - Osobny LoRA per widok (front, side, back)
 - Trained on inpainting UNet (SD 1.5 or SD 2.0)
 - Cel: memoryzacja wyglądu ubrania z konkretnego kąta
 
-### 6. SDS Loss (`src/sds/`)
+### 6. SDS Loss
 - Score Distillation Sampling z per-view expert switching
 - Multi-adapter PeftModel (front/side/back loaded simultaneously)
 - Automatyczne przełączanie adaptera na podstawie kąta kamery
-- Integracja z 3DGS training loop (train_sds.py)
+- Integracja z 3DGS training loop
 
 ## Technologie
 
@@ -142,15 +142,6 @@ System CatVTON + 3DGS realizuje pipeline **multi-view virtual try-on z rekonstru
 - CUDA 12.x, Python 3.10+
 -  ~20-30 GB przestrzeni dyskowej na modele (HuggingFace cache, COLMAP, checkpointy 3DGS)
 - **Min. 16 G VRAM**
-
-## Komunikacja między komponentami
-
-1. Notebook orchestruje cały pipeline sekwencyjnie
-2. Modele HuggingFace pobierane lazily (przy pierwszym użyciu)
-3. Wyniki pośrednie zapisywane jako pliki obrazów na dysku
-4. COLMAP operuje na folderze z obrazami (stdin/stdout)
-5. 3DGS trenowany jako osobny proces Python (train.py / train_sds.py)
-6. Expert LoRAs zapisywane jako safetensors/bin w dedykowanym folderze
 
 ## Zmiany względem pierwotnych założeń
 

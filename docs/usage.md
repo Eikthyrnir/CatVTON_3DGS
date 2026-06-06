@@ -96,8 +96,7 @@ W notebooku wyświetlane automatycznie (`show_multiple_images`).
 ### Model 3DGS
 Wynikowy plik `.ply` (w folderze output) można otworzyć w:
 - [SuperSplat](https://playcanvas.com/supersplat/editor) (przeglądarka)
-- [3DGS Viewer](https://github.com/graphdeco-inria/gaussian-splatting#interactive-viewers)
-- [Luma AI](https://lumalabs.ai/interactive-scenes)
+- [3DGS Viewer](https://github.com/graphdeco-inria/gaussian-splatting#interactive-viewers) (lokalnie za pomocą repozytorium)
 
 ### Loss curves
 Funkcja `show_3DGS_loss_curve(output_dir)` wizualizuje krzywe strat z TensorBoard.
