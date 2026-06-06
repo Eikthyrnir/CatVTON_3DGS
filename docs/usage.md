@@ -4,7 +4,7 @@
 
 ### 1. Otwórz notebook w Google Colab
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Eikthyrnir/CatVTON_3DGS/blob/main/CatVTON_3DGS_pipeline.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Eikthyrnir/CatVTON_3DGS/blob/main/src/CatVTON_3DGS_pipeline.ipynb)
 
 ### 2. Wybierz GPU runtime
 - Menu: `Runtime` -> `Change runtime type` -> `A100` (lub L4)
