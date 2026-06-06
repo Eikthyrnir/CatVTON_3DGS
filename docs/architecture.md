@@ -2,7 +2,7 @@
 
 ## Przegląd
 
-System CatVTON + 3DGS realizuje pipeline **multi-view virtual try-on z rekonstrukcją 3D**. Na wejściu otrzymuje wideo kamery obracającej się wokół osoby oraz zdjęcia ubrania, a na wyjściu produkuje model 3D Gaussian Splatting osoby w nowym ubraniu, renderowalny z dowolnego kąta.
+System CatVTON + 3DGS realizuje pipeline **multi-view virtual try-on z rekonstrukcją 3D**. Na wejściu system otrzymuje wideo przedstawiające kamerę obracającą się wokół osoby oraz zdjęcia ubrania, a na wyjściu generuje model 3D w reprezentacji Gaussian Splatting, przedstawiający osobę w nowym ubraniu, umożliwiający renderowanie z dowolnego kąta.
 
 ## Diagram pipeline
 
