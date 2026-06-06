@@ -36,7 +36,7 @@ Pipeline do wirtualnego przymierzania ubrań (Virtual Try-On) z rekonstrukcją 3
 ### Google Colab
 
 1. Otwórz notebook w Colab:
-   [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Eikthyrnir/CatVTON_3DGS/blob/main/CatVTON_3DGS_pipeline.ipynb)
+   [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Eikthyrnir/CatVTON_3DGS/blob/main/src/CatVTON_3DGS_pipeline.ipynb)
 
 2. Wybierz runtime z GPU (A100 lub L4)
 
