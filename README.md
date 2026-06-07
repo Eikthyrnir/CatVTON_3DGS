@@ -144,3 +144,22 @@ Pełna reprodukcja od zera (try-on + 3DGS + LoRA + SDS) zajmuje ~2-3h na A100.
 5. **Zależność od zewnętrznych repozytoriów**: CatVTON i gaussian-splatting są klonowane w runtime.
 6. **SDS Loss**: Implementacja eksperymentalna - na razie wyniki SDS-augmented 3DGS nie dają nam lepszych wyników w porównaniu do vanilla 3DGS w obecnej konfiguracji. Wymaga dalszego tuningu hiperparametrów.
 7. **Dane**: Wideo testowe (vadim.MOV) i ubrania są hostowane na Google Drive
+
+## Licencja
+
+Kod i dokumentacja w tym repozytorium są objęte licencją **Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)** — patrz [LICENSE](LICENSE).
+Oznacza to użycie **niekomercyjne**, z **uznaniem autorstwa** i na **tych samych warunkach** (ShareAlike).
+
+Copyright © 2026 Tim Barvenov, Ihnatsi Byshniou.
+
+## Podziękowania i licencje zewnętrzne (third-party)
+
+Projekt korzysta z komponentów firm trzecich, każdy na własnej licencji:
+
+- **CatVTON** (Zheng-Chong et al.) — CC BY-NC-SA 4.0
+- **3D Gaussian Splatting** (Inria GRAPHDECO; fork camenduru) — Gaussian-Splatting License (tylko badania niekomercyjne)
+- **Stable Diffusion Inpainting** (RunwayML / Stability AI) — CreativeML OpenRAIL-M
+- **Depth Anything V2**, **SegFormer (b2_clothes)**, **MediaPipe**, **YOLOv8 (Ultralytics — AGPL-3.0)**, **SCHP / DensePose** — patrz licencje w odpowiednich repozytoriach / kartach modeli.
+
+Efektywne użycie całości jest **niekomercyjne / wyłącznie do celów badawczych**, zgodnie z najbardziej restrykcyjnymi warunkami komponentów źródłowych.
