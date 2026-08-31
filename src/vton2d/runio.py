@@ -221,6 +221,25 @@ def load_run(run_dir: str | os.PathLike) -> dict:
     }
 
 
+def update_manifest(run_dir: str | os.PathLike, **extra: Any) -> dict:
+    """Merge keys into a run's ``manifest["extra"]`` and rewrite it.
+
+    For backfilling information onto a run that was produced before the code recorded it. The
+    config block is never touched: what a run was configured with is a historical fact.
+    """
+    root = Path(run_dir)
+    path = root / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.setdefault("extra", {}).update(extra)
+    manifest.setdefault("amended_utc", [])
+    manifest["amended_utc"].append({
+        "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "keys": sorted(extra),
+    })
+    path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
+
+
 def export_stage(
     run_dir: str | os.PathLike,
     dest: str | os.PathLike,

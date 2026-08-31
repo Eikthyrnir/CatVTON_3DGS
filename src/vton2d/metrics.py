@@ -34,6 +34,9 @@ __all__ = [
     "gradient_magnitude_mean",
     "detail_statistic",
     "width_error",
+    "aggregate_width_error",
+    "view_from_densepose",
+    "mask_iou",
     "pairwise_lpips_ssim",
 ]
 
@@ -252,6 +255,46 @@ def width_error(mask, densepose, torso_labels: Sequence[int] = TORSO_LABELS) -> 
         "n_rows_empty": int(n_empty),
         "torso_box_width_px": box_width,
     }
+
+
+def mask_iou(mask_a, mask_b) -> float:
+    """Intersection over union of two masks.
+
+    The instrument for the $T_1$ sweep of Section 4.3.2: the only property of the coarse pass used
+    downstream is the *shape* of the generated garment, so the question "is a cheaper coarse pass
+    good enough" is answered on the cloth-specific mask it yields, not on the final image.
+    """
+    a = as_mask(mask_a) > 0
+    b = _resize_mask_to(as_mask(mask_b), a.shape[:2]) > 0
+    union = np.logical_or(a, b).sum()
+    if union == 0:
+        return float("nan")
+    return float(np.logical_and(a, b).sum() / union)
+
+
+def view_from_densepose(
+    densepose,
+    front_label: int = 2,
+    back_label: int = 1,
+    dominance: float = 2.0,
+) -> str:
+    """Orientation class of a frame from its DensePose part map (``eq:view-label``).
+
+    The same 2:1 dominance test the pipeline uses at generation time: front torso against back
+    torso, and *side* when neither dominates. Recomputing it from the saved part map means the
+    orientation classes can be recovered from a run directory alone, without re-running the
+    parser or keeping the notebook's ``body_params`` alive.
+    """
+    dp = np.asarray(_open(densepose).convert("L"))
+    front = int(np.sum(dp == front_label))
+    back = int(np.sum(dp == back_label))
+    if front + back == 0:
+        return "unknown"
+    if front > back * dominance:
+        return "front"
+    if back > front * dominance:
+        return "back"
+    return "side"
 
 
 def aggregate_width_error(per_frame: Iterable[dict | None]) -> dict:

@@ -16,7 +16,8 @@ Usage from the notebook::
     from vton2d import RunConfig, RunWriter, run_orbit, score_run
 """
 
-from .runio import STAGES, RunConfig, RunWriter, load_run, list_runs, export_stage
+from .runio import (STAGES, RunConfig, RunWriter, load_run, list_runs, export_stage,
+                    update_manifest)
 from .metrics import (
     consistency_series,
     consistency_pair,
@@ -25,8 +26,11 @@ from .metrics import (
     hsv_histogram,
     pairwise_lpips_ssim,
     width_error,
+    view_from_densepose,
+    mask_iou,
 )
-from .driver import run_orbit, score_run, count_decoder_attn1
+from .driver import (run_orbit, score_run, report_run, compare_runs, infer_view_of,
+                     backfill_view_of, count_decoder_attn1)
 
 __all__ = [
     "STAGES",
@@ -35,6 +39,13 @@ __all__ = [
     "load_run",
     "list_runs",
     "export_stage",
+    "update_manifest",
+    "view_from_densepose",
+    "mask_iou",
+    "report_run",
+    "compare_runs",
+    "infer_view_of",
+    "backfill_view_of",
     "consistency_series",
     "consistency_pair",
     "detail_statistic",

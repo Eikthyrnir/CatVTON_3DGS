@@ -16,7 +16,8 @@ from typing import Callable, Iterable, Sequence
 from . import metrics as M
 from .runio import RunConfig, RunWriter, load_run
 
-__all__ = ["run_orbit", "score_run", "count_decoder_attn1", "VIEW_ORDER"]
+__all__ = ["run_orbit", "score_run", "report_run", "compare_runs", "infer_view_of",
+           "backfill_view_of", "count_decoder_attn1", "VIEW_ORDER"]
 
 #: Generation order over the orientation classes. **This order is load-bearing** (thesis 4.4.2).
 #: A reference pass clears the key/value bank and refills it, so every frame that consumes a bank
@@ -190,6 +191,15 @@ def score_run(
 
     result: dict = {"run_dir": Path(run_dir), "config": run["config"], "n_frames": len(names)}
     result["consistency"] = M.consistency_series(finals, masks)
+    result["frames"] = names
+
+    # Boundary analysis. Section 6.3 predicts that consistency is worst where the orientation
+    # class changes, because both the injected appearance and the conditioning photograph switch
+    # there at once. Splitting the pairs is what turns that prediction into a measurement.
+    views = run["manifest"].get("extra", {}).get("view_of") or infer_view_of(run_dir)
+    if views:
+        result["view_of"] = views
+        result["boundaries"] = _boundary_split(result["consistency"]["distances"], names, views)
 
     # The detail statistic: never report consistency without it (Section 5.2.3).
     if garment_for is not None:
@@ -236,6 +246,291 @@ def score_run(
             print(f"width {stage:<11} median {w['median_pct']:+.1f}%   "
                   f"q75 {w['q75_pct']:+.1f}%   over {w['n_frames']} frames")
     return result
+
+
+def infer_view_of(run_dir: str | os.PathLike) -> dict[str, str]:
+    """Recover each frame's orientation class from the DensePose maps saved in a run.
+
+    Applies the same 2:1 dominance test the pipeline used at generation time, so a run written
+    before ``run_orbit`` recorded ``view_of`` can still be analysed. Returns ``{}`` when the run
+    has no ``densepose/`` stage.
+    """
+    root = Path(run_dir)
+    if not (root / "densepose").is_dir():
+        return {}
+    out = {}
+    for path in sorted((root / "densepose").glob("*.png")):
+        out[path.stem] = M.view_from_densepose(path)
+    return out
+
+
+def backfill_view_of(run_dir: str | os.PathLike, verbose: bool = True) -> dict[str, str]:
+    """Infer the orientation classes of an existing run and write them into its manifest."""
+    from .runio import update_manifest
+
+    views = infer_view_of(run_dir)
+    if not views:
+        raise FileNotFoundError(f"no densepose/ stage in {run_dir}; cannot infer orientations")
+    update_manifest(run_dir, view_of=views)
+    if verbose:
+        counts: dict[str, int] = {}
+        for v in views.values():
+            counts[v] = counts.get(v, 0) + 1
+        print(f"wrote view_of for {len(views)} frames: " +
+              "  ".join(f"{k} {n}" for k, n in sorted(counts.items())))
+    return views
+
+
+def _boundary_split(distances, names: Sequence[str], view_of: dict[str, str]) -> dict:
+    """Split adjacent-pair distances into those crossing an orientation class and those inside one."""
+    import numpy as np
+
+    edges, interior = [], []
+    for i in range(len(distances)):
+        a, b = view_of.get(names[i]), view_of.get(names[i + 1])
+        (edges if (a and b and a != b) else interior).append(i)
+
+    def stat(idx):
+        if not idx:
+            return None
+        d = np.asarray([distances[i] for i in idx])
+        return {"n": len(idx), "mean": float(d.mean()), "max": float(d.max())}
+
+    b, it = stat(edges), stat(interior)
+    return {
+        "boundary": b,
+        "interior": it,
+        "ratio": (b["mean"] / it["mean"]) if (b and it and it["mean"] > 0) else None,
+        "boundary_pairs": [(names[i], names[i + 1], float(distances[i])) for i in edges],
+    }
+
+
+def report_run(run_dir: str | os.PathLike, garment_for=None) -> dict:
+    """Print every statistic a run supports, in one block, and return them.
+
+    Reads only the run directory, so it works in a fresh session with no model loaded.
+    """
+    from .runio import load_run
+
+    run = load_run(run_dir)
+    cfg = run["config"]
+    man = run["manifest"]
+    res = score_run(run_dir, garment_for=garment_for, verbose=False)
+    W = 64
+
+    def rule(title=""):
+        print("-" * W if not title else f"\n{'-' * W}\n {title}\n{'-' * W}")
+
+    print("=" * W)
+    print(f" RUN  {cfg.get('run_id', Path(run_dir).name)}")
+    print("=" * W)
+    print(f" subject / garment  {cfg.get('subject','?')} / {cfg.get('garment','?')}")
+    print(f" steps T1 / T2      {cfg.get('coarse_steps')} / {cfg.get('fine_steps')}")
+    print(f" guidance           {cfg.get('guidance_scale')}  (frontal reference "
+          f"{cfg.get('ref_guidance_scale')})")
+    print(f" mask variant       {cfg.get('mask_variant')}   dilation {cfg.get('mask_dilate')} px")
+    print(f" injection          {cfg.get('injection')}   window {cfg.get('window')}")
+    print(f" seed / resolution  {cfg.get('seed')} / {tuple(cfg.get('resolution', ()))}")
+    print(f" written / commit   {man.get('written_utc','?')} / {str(man.get('commit',''))[:8]}")
+    if cfg.get("notes"):
+        print(f" notes              {cfg['notes']}")
+
+    views = res.get("view_of", {})
+    counts: dict[str, int] = {}
+    for v in views.values():
+        counts[v] = counts.get(v, 0) + 1
+    tally = "   ".join(f"{k} {n}" for k, n in sorted(counts.items())) if counts else "unknown"
+    print(f"\n FRAMES  {res['n_frames']}    {tally}")
+
+    c = res["consistency"]
+    rule("CROSS-VIEW CONSISTENCY   (Section 5.2.3, lower is better)")
+    print(f" mean {c['mean']:.4f}    median {c['median']:.4f}    "
+          f"p90 {c['p90']:.4f}    max {c['max']:.4f}")
+    i, j = c["argmax_pair"]
+    fa, fb = res["frames"][i], res["frames"][j]
+    edge = ""
+    if views:
+        edge = f"  ({views.get(fa,'?')} -> {views.get(fb,'?')})"
+    print(f" worst pair  {fa} -> {fb}{edge}")
+    if c["skipped_frames"]:
+        print(f" skipped {len(c['skipped_frames'])} frame(s) with an empty mask")
+
+    if res.get("boundaries"):
+        bs = res["boundaries"]
+        b, it, ratio = bs["boundary"], bs["interior"], bs["ratio"]
+        print()
+        if b:
+            print(f" boundary pairs  n={b['n']:<3} mean {b['mean']:.4f}   max {b['max']:.4f}")
+        if it:
+            print(f" interior pairs  n={it['n']:<3} mean {it['mean']:.4f}   max {it['max']:.4f}")
+        if ratio:
+            verdict = ("supports Section 6.3" if ratio > 1.25 else
+                       "does NOT support Section 6.3" if ratio < 1.05 else "inconclusive")
+            print(f" ratio           {ratio:.2f}x  -> {verdict}")
+        if b:
+            print(" every class boundary:")
+            for a, bb, d in bs["boundary_pairs"]:
+                print(f"   {a} -> {bb}   {d:.4f}   "
+                      f"({views.get(a,'?')} -> {views.get(bb,'?')})")
+
+    rule("GARMENT DETAIL   (Section 5.2.3, ~1.0 = photograph-level texture)")
+    if res.get("detail"):
+        d = res["detail"]
+        print(f" mean {d['mean']:.3f}    min {d['min']:.3f}    over {d['n_frames']} frames")
+        print(" -> " + ("well clear of the degenerate case; the consistency figure is usable"
+                        if d["mean"] > 0.6 else
+                        "LOW: check whether the garment is being erased rather than stabilised"))
+    else:
+        print(" not computed. Pass garment_for=... — consistency alone is not evidence,")
+        print(" because a flat, textureless garment scores a perfect 0 (Section 5.2.3).")
+
+    rule("MASK WIDTH vs DensePose torso   (Section 5.2.4, + means too wide)")
+    if res["width_error"]:
+        print(f" {'mask':<12}{'median':>9}{'q75':>9}{'frames':>9}")
+        for stage in ("agnostic", "cloth_mask", "comp_mask"):
+            w = res["width_error"].get(stage)
+            if w:
+                print(f" {stage:<12}{w['median_pct']:>+8.1f}%{w['q75_pct']:>+8.1f}%"
+                      f"{w['n_frames']:>9}")
+        gen = "comp_mask" if cfg.get("mask_variant") == "composition" else "cloth_mask"
+        print(f" -> this run generates with {gen}")
+    else:
+        print(" no width errors: the run has no densepose/ stage")
+    print()
+    return res
+
+
+def compare_runs(
+    run_dirs: Sequence[str | os.PathLike],
+    baseline: str | os.PathLike | None = None,
+    garment_for=None,
+    axes: Sequence[str] = ("coarse_steps", "fine_steps"),
+    frames: Iterable[str] | None = None,
+    common_frames: bool = True,
+    mask_stage: str = "cloth_mask",
+    lpips: bool = False,
+    verbose: bool = True,
+) -> list[dict]:
+    """Tabulate several runs side by side: one row per run, one column per statistic.
+
+    Built for a sweep. `axes` names the config fields that vary, so the table leads with them.
+
+    `baseline` is a run every other run is compared against, which is what makes a sweep readable:
+
+    * **mask IoU** against the baseline's cloth-specific mask answers the $T_1$ question, because
+      the only property of the coarse pass used downstream is the *shape* it produces
+      (Section 4.3.2). Scoring $T_1$ on the final image instead would confound it with $T_2$.
+    * **LPIPS / SSIM** against the baseline's final frame answers the $T_2$ question, since the
+      refined pass output is the delivered artefact (Section 4.3.5). Off by default: it needs the
+      optional `lpips` package and is much slower than the rest.
+
+    Only frames present in both a run and the baseline are compared, so a sweep may be run on a
+    subset of the orbit. By default (`common_frames`) **every run is scored over the frames they
+    all share**, so that a sweep on a 14-frame arc can be tabulated against a 58-frame reference
+    corpus without the two rows measuring different things. Pass `frames` to fix the set
+    explicitly, or `common_frames=False` to score each run over everything it holds.
+    """
+    import numpy as np
+
+    from .runio import load_run
+
+    run_dirs = list(run_dirs)
+    base = load_run(baseline) if baseline is not None else None
+    base_frames = set(base["frames"]) if base else set()
+
+    shared_set: set[str] | None = None
+    if frames is not None:
+        shared_set = {Path(f).stem for f in frames}
+    elif common_frames:
+        every = [set(load_run(d)["frames"]) for d in run_dirs]
+        if base is not None:
+            every.append(base_frames)
+        shared_set = set.intersection(*every) if every else None
+        if shared_set is not None and verbose and any(len(s) != len(shared_set) for s in every):
+            print(f"scoring every run over the {len(shared_set)} frame(s) they share\n")
+
+    rows = []
+    for run_dir in run_dirs:
+        run = load_run(run_dir)
+        cfg = run["config"]
+        try:
+            res = score_run(run_dir, garment_for=garment_for, verbose=False,
+                            frames=sorted(shared_set) if shared_set else None)
+        except (ValueError, FileNotFoundError) as exc:
+            rows.append({"run_id": cfg.get("run_id"), "error": str(exc)[:60]})
+            continue
+
+        row: dict = {"run_id": cfg.get("run_id", Path(run_dir).name)}
+        for axis in axes:
+            row[axis] = cfg.get(axis)
+        row["n"] = res["n_frames"]
+        row["consistency_mean"] = res["consistency"]["mean"]
+        row["consistency_max"] = res["consistency"]["max"]
+        row["detail_mean"] = (res.get("detail") or {}).get("mean")
+        comp = res["width_error"].get("comp_mask") or res["width_error"].get(mask_stage) or {}
+        row["width_median_pct"] = comp.get("median_pct")
+        if res.get("boundaries") and res["boundaries"]["ratio"]:
+            row["boundary_ratio"] = res["boundaries"]["ratio"]
+
+        if base is not None and str(run_dir) != str(baseline):
+            shared = sorted((set(run["frames"]) & base_frames) if shared_set is None
+                            else shared_set)
+            if shared:
+                ious = [
+                    M.mask_iou(run["path"](mask_stage, n), base["path"](mask_stage, n))
+                    for n in shared
+                ]
+                row["mask_iou_vs_base"] = float(np.nanmean(ious))
+                row["mask_iou_min"] = float(np.nanmin(ious))
+                if lpips:
+                    vals = [
+                        M.pairwise_lpips_ssim(run["path"]("final", n), base["path"]("final", n))
+                        for n in shared
+                    ]
+                    got = [v["lpips"] for v in vals if v["lpips"] is not None]
+                    if got:
+                        row["lpips_vs_base"] = float(np.mean(got))
+        rows.append(row)
+
+    if verbose:
+        _print_table(rows, axes)
+    return rows
+
+
+def _print_table(rows: Sequence[dict], axes: Sequence[str]) -> None:
+    """Fixed-width table of :func:`compare_runs` rows."""
+    if not rows:
+        print("no runs to compare")
+        return
+    cols = [
+        (a, a.replace("coarse_steps", "T1").replace("fine_steps", "T2"), 5, "{:>5}") for a in axes
+    ] + [
+        ("n", "n", 4, "{:>4}"),
+        ("consistency_mean", "consist", 9, "{:>9.4f}"),
+        ("consistency_max", "worst", 8, "{:>8.4f}"),
+        ("detail_mean", "detail", 8, "{:>8.3f}"),
+        ("width_median_pct", "width%", 8, "{:>+8.1f}"),
+        ("mask_iou_vs_base", "maskIoU", 9, "{:>9.3f}"),
+        ("mask_iou_min", "IoU min", 9, "{:>9.3f}"),
+        ("lpips_vs_base", "LPIPS", 8, "{:>8.4f}"),
+        ("boundary_ratio", "bnd x", 7, "{:>7.2f}"),
+    ]
+    present = [c for c in cols if any(r.get(c[0]) is not None for r in rows)]
+    header = "".join(f"{label:>{w}}" for _, label, w, _ in present)
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        if "error" in r:
+            print(f"  {r['run_id']}: {r['error']}")
+            continue
+        line = ""
+        for key, _, w, fmt in present:
+            v = r.get(key)
+            line += fmt.format(v) if v is not None else " " * w
+        print(line)
+    print("\nconsist/worst: lower is better | detail ~1.0 = photograph-level texture")
+    print("width%: composition mask against the DensePose torso, + means too wide")
+    print("maskIoU: agreement of the cloth-specific mask with the baseline run")
 
 
 def count_decoder_attn1(unet, verbose: bool = True) -> dict:
