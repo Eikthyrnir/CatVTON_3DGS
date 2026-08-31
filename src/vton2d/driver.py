@@ -81,6 +81,7 @@ def run_orbit(
 
     generated: list[str] = []
     per_view: dict[str, int] = {}
+    view_of: dict[str, str] = {}   # frame stem -> orientation class, for boundary analysis
 
     def call(person_path: str, view: str, is_ref: bool, saved_steps: int) -> int:
         person_img = _load_person(person_path, config.resolution)
@@ -102,6 +103,7 @@ def run_orbit(
             writer.save_parse_steps(name, artefacts["parse_steps"])
             saved_steps += 1
         generated.append(Path(name).stem)
+        view_of[Path(name).stem] = view
         if on_frame is not None:
             on_frame(view, name, artefacts)
         if verbose:
@@ -139,7 +141,13 @@ def run_orbit(
             saved_steps = call(path, view, not inject, saved_steps)
         per_view[view] = len(targets) + 1
 
-    writer.write_manifest(extra={"per_view": per_view, "view_order": list(VIEW_ORDER)})
+    writer.write_manifest(extra={
+        "per_view": per_view,
+        "view_order": list(VIEW_ORDER),
+        # Per-frame orientation class. Needed to tell which adjacent pairs sit at a class
+        # boundary, which is what Section 6.3 predicts the consistency minima coincide with.
+        "view_of": view_of,
+    })
     if verbose:
         print(f"\nWrote {len(generated)} frames to {writer.root}")
     return {"run_dir": writer.root, "frames": generated, "per_view": per_view}
