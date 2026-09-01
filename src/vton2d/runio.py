@@ -119,22 +119,46 @@ class RunWriter:
     the second silently overwrites the first and the resulting table cannot be trusted.
     """
 
-    def __init__(self, root: str | os.PathLike, config: RunConfig, overwrite: bool = False):
+    def __init__(
+        self,
+        root: str | os.PathLike,
+        config: RunConfig,
+        overwrite: bool = False,
+        resume: bool = False,
+    ):
         self.config = config
         self.root = Path(root) / config.run_id
+        self.resumed = False
         manifest = self.root / "manifest.json"
         if manifest.exists():
-            if not overwrite:
+            if resume:
+                self.resumed = True
+            elif overwrite:
+                # Destructive, and on a full orbit that is an hour of GPU time. Reached only
+                # because a caller asked for it explicitly.
+                shutil.rmtree(self.root)
+            else:
                 raise FileExistsError(
-                    f"{self.root} already holds a run. Pass overwrite=True to replace it, "
-                    f"or choose a different run_id."
+                    f"{self.root} already holds a run.\n"
+                    f"  - to add only what is missing, pass resume=True (nothing is deleted)\n"
+                    f"  - to regenerate from scratch, pass overwrite=True (DELETES the run)\n"
+                    f"  - or give this configuration a different run_id"
                 )
-            shutil.rmtree(self.root)
         for stage in STAGES:
             (self.root / stage).mkdir(parents=True, exist_ok=True)
         (self.root / "garment").mkdir(parents=True, exist_ok=True)
         self._counts = {stage: 0 for stage in STAGES}
         self._frames: list[str] = []
+        if self.resumed:
+            try:
+                self._frames = list(json.loads(manifest.read_text(encoding="utf-8"))
+                                    .get("frames", []))
+            except Exception:
+                self._frames = []
+
+    def has(self, stage: str, name: str) -> bool:
+        """Whether this run already holds `stage` for `name`."""
+        return (self.root / stage / f"{self._stem(name)}.png").exists()
 
     # -- writing -----------------------------------------------------------
 

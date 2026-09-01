@@ -16,8 +16,8 @@ from typing import Callable, Iterable, Sequence
 from . import metrics as M
 from .runio import RunConfig, RunWriter, load_run
 
-__all__ = ["run_orbit", "score_run", "report_run", "compare_runs", "infer_view_of",
-           "backfill_view_of", "count_decoder_attn1", "VIEW_ORDER"]
+__all__ = ["run_orbit", "ensure_orbit", "score_run", "report_run", "compare_runs",
+           "infer_view_of", "backfill_view_of", "count_decoder_attn1", "VIEW_ORDER"]
 
 #: Generation order over the orientation classes. **This order is load-bearing** (thesis 4.4.2).
 #: A reference pass clears the key/value bank and refills it, so every frame that consumes a bank
@@ -41,6 +41,7 @@ def run_orbit(
     config: RunConfig,
     writer: RunWriter,
     parse_steps_for: int = 2,
+    skip_existing: bool = False,
     on_frame: Callable[[str, str, dict], None] | None = None,
     verbose: bool = True,
 ) -> dict:
@@ -63,6 +64,11 @@ def run_orbit(
     parse_steps_for
         Save the mask progression for this many frames per view class. Source material for
         ``fig:mask-stages``; saving it for every frame is wasteful.
+    skip_existing
+        Generate only the frames whose ``final`` image is not already in the run directory. Use
+        with ``RunWriter(..., resume=True)`` after a Colab runtime dies mid-orbit. The reference
+        frame of a class is regenerated whenever any of its targets are, because its pass is what
+        fills the key/value bank the targets read from and that bank does not survive a restart.
 
     Returns a summary dict; the manifest is written before returning.
     """
@@ -81,6 +87,7 @@ def run_orbit(
         )
 
     generated: list[str] = []
+    n_generated = 0          # frames actually put through the model
     per_view: dict[str, int] = {}
     view_of: dict[str, str] = {}   # frame stem -> orientation class, for boundary analysis
 
@@ -103,6 +110,8 @@ def run_orbit(
         if saved_steps < parse_steps_for and artefacts.get("parse_steps"):
             writer.save_parse_steps(name, artefacts["parse_steps"])
             saved_steps += 1
+        nonlocal n_generated
+        n_generated += 1
         generated.append(Path(name).stem)
         view_of[Path(name).stem] = view
         if on_frame is not None:
@@ -112,6 +121,15 @@ def run_orbit(
             print(f"  [{view}/{tag}] {name}")
         return saved_steps
 
+    def note(person_path: str, view: str) -> None:
+        """Record a frame that is already on disk, without regenerating it."""
+        stem = Path(person_path).stem
+        view_of[stem] = view
+        if stem not in generated:
+            generated.append(stem)
+
+    missing = lambda path: not writer.has("final", os.path.basename(path))
+
     for view in VIEW_ORDER:
         targets = list(frames_by_view.get(view, []))
         reference = references.get(view)
@@ -119,26 +137,40 @@ def run_orbit(
             continue
         if view not in garments:
             raise KeyError(f"no garment photograph supplied for view {view!r}")
+
+        todo = [p for p in targets if missing(p)] if skip_existing else list(targets)
+        done = [p for p in targets if p not in todo]
         if verbose:
-            print(f"\n=== {view}: {len(targets)} target frame(s)"
+            have = f", {len(done)} already present" if done else ""
+            print(f"\n=== {view}: {len(todo)} target frame(s) to generate{have}"
                   f"{', 1 reference' if reference else ', no reference'} ===")
 
         writer.save_garment(view, garments[view])
         saved_steps = 0
+        for path in done:
+            note(path, view)
 
         if view == "side":
-            # No injection: every lateral frame is generated as its own reference pass.
-            for path in targets:
+            # No injection: every lateral frame is generated as its own reference pass, so each
+            # one can be resumed independently of the others.
+            for path in todo:
                 saved_steps = call(path, view, True, saved_steps)
             per_view[view] = len(targets)
             continue
 
         if reference is None:
             raise KeyError(f"view {view!r} has target frames but no reference frame")
-        # Reference first: fills the bank that the targets below consume.
-        saved_steps = call(reference, view, True, saved_steps)
+
+        if todo or not skip_existing or missing(reference):
+            # The reference is regenerated whenever any target of this class still has to be
+            # made: its pass is what fills the key/value bank those targets read from, and the
+            # bank does not survive between sessions. One extra frame, and skipping it would
+            # silently produce targets with an empty bank.
+            saved_steps = call(reference, view, True, saved_steps)
+        else:
+            note(reference, view)
         inject = config.injection != "none"
-        for path in targets:
+        for path in todo:
             saved_steps = call(path, view, not inject, saved_steps)
         per_view[view] = len(targets) + 1
 
@@ -151,7 +183,62 @@ def run_orbit(
     })
     if verbose:
         print(f"\nWrote {len(generated)} frames to {writer.root}")
-    return {"run_dir": writer.root, "frames": generated, "per_view": per_view}
+    return {"run_dir": writer.root, "frames": generated, "per_view": per_view,
+            "n_generated": n_generated}
+
+
+def ensure_orbit(
+    frames_by_view: dict[str, Sequence[str]],
+    garments: dict[str, "object"],
+    references: dict[str, str],
+    tryon_fn: Callable[..., dict],
+    config: RunConfig,
+    runs_root: str | os.PathLike,
+    force: bool = False,
+    verbose: bool = True,
+    **kwargs,
+) -> dict:
+    """Generate a run only to the extent that it is not already on disk.
+
+    Makes the notebook cell safe to re-run from the top, which matters because a Colab runtime
+    can die at any point in an hour-long orbit. Three outcomes:
+
+    * nothing on disk        -> generate everything
+    * partially generated    -> generate only what is missing, keeping what is there
+    * already complete       -> generate nothing, just report
+
+    `force=True` deletes the existing run and regenerates it from scratch. That is the only path
+    that destroys work, and it never happens by accident.
+    """
+    expected = []
+    for view in VIEW_ORDER:
+        targets = list(frames_by_view.get(view, []))
+        if not targets and view not in references:
+            continue
+        expected += [Path(p).stem for p in targets]
+        if view != "side" and references.get(view):
+            expected.append(Path(references[view]).stem)
+
+    root = Path(runs_root) / config.run_id
+    present = {p.stem for p in (root / "final").glob("*.png")} if (root / "final").is_dir() else set()
+    outstanding = [f for f in expected if f not in present]
+
+    if not force and (root / "manifest.json").exists() and not outstanding:
+        if verbose:
+            print(f"run already complete: {len(present)} frame(s) in {root}\n"
+                  f"nothing to generate. Pass force=True to regenerate from scratch "
+                  f"(this DELETES the existing run).")
+        return {"run_dir": root, "frames": sorted(present), "generated": 0, "reused": len(present)}
+
+    if verbose and present and not force:
+        print(f"resuming: {len(present)} frame(s) already present, {len(outstanding)} to generate")
+
+    writer = RunWriter(runs_root, config, overwrite=force, resume=not force)
+    summary = run_orbit(frames_by_view, garments, references, tryon_fn, config, writer,
+                        skip_existing=not force, verbose=verbose, **kwargs)
+    summary["generated"] = summary.get("n_generated", len(outstanding))
+    summary["reused"] = max(0, len(summary["frames"]) - summary["generated"])
+    return summary
 
 
 # ---------------------------------------------------------------------------

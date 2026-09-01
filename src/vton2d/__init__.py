@@ -29,8 +29,8 @@ from .metrics import (
     view_from_densepose,
     mask_iou,
 )
-from .driver import (run_orbit, score_run, report_run, compare_runs, infer_view_of,
-                     backfill_view_of, count_decoder_attn1)
+from .driver import (run_orbit, ensure_orbit, score_run, report_run, compare_runs,
+                     infer_view_of, backfill_view_of, count_decoder_attn1)
 
 __all__ = [
     "STAGES",
@@ -54,6 +54,7 @@ __all__ = [
     "pairwise_lpips_ssim",
     "width_error",
     "run_orbit",
+    "ensure_orbit",
     "score_run",
     "count_decoder_attn1",
 ]
