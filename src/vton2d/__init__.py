@@ -17,7 +17,7 @@ Usage from the notebook::
 """
 
 from .runio import (STAGES, RunConfig, RunWriter, load_run, list_runs, export_stage,
-                    update_manifest)
+                    update_manifest, save_scores, load_scores)
 from .metrics import (
     consistency_series,
     consistency_pair,
@@ -40,6 +40,8 @@ __all__ = [
     "list_runs",
     "export_stage",
     "update_manifest",
+    "save_scores",
+    "load_scores",
     "view_from_densepose",
     "mask_iou",
     "report_run",

@@ -392,12 +392,14 @@ def _boundary_split(distances, names: Sequence[str], view_of: dict[str, str]) ->
     }
 
 
-def report_run(run_dir: str | os.PathLike, garment_for=None) -> dict:
+def report_run(run_dir: str | os.PathLike, garment_for=None, save: bool = True) -> dict:
     """Print every statistic a run supports, in one block, and return them.
 
-    Reads only the run directory, so it works in a fresh session with no model loaded.
+    Reads only the run directory, so it works in a fresh session with no model loaded. By default
+    the numbers are also written to ``scores.json`` inside the run, so a result survives the
+    Colab runtime that produced it and can be quoted without being recomputed.
     """
-    from .runio import load_run
+    from .runio import load_run, save_scores
 
     run = load_run(run_dir)
     cfg = run["config"]
@@ -483,6 +485,10 @@ def report_run(run_dir: str | os.PathLike, garment_for=None) -> dict:
         print(f" -> this run generates with {gen}")
     else:
         print(" no width errors: the run has no densepose/ stage")
+
+    if save:
+        path = save_scores(run_dir, res)
+        print(f"\n saved to {path}")
     print()
     return res
 

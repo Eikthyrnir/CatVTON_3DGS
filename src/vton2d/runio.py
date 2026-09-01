@@ -245,6 +245,47 @@ def load_run(run_dir: str | os.PathLike) -> dict:
     }
 
 
+def _jsonable(obj: Any) -> Any:
+    """Convert numpy scalars/arrays, Paths and tuples into something json can write."""
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, Path):
+        return str(obj)
+    if hasattr(obj, "tolist"):          # numpy array or scalar
+        return obj.tolist()
+    if hasattr(obj, "item") and not isinstance(obj, (str, bytes)):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    return obj
+
+
+def save_scores(run_dir: str | os.PathLike, scores: dict, name: str = "scores.json") -> Path:
+    """Write a scoring result next to the artefacts it was computed from.
+
+    The run directory is the unit that gets archived, so the numbers belong inside it rather than
+    in a notebook cell's output. Includes the per-pair consistency distances, so a plot can be
+    redrawn without recomputing, and stamps the package version because a later change to a
+    metric would make an old file incomparable.
+    """
+    from . import __version__
+
+    payload = _jsonable(dict(scores))
+    payload["computed_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    payload["vton2d_version"] = __version__
+    path = Path(run_dir) / name
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def load_scores(run_dir: str | os.PathLike, name: str = "scores.json") -> dict:
+    """Read back a result written by :func:`save_scores`."""
+    return json.loads((Path(run_dir) / name).read_text(encoding="utf-8"))
+
+
 def update_manifest(run_dir: str | os.PathLike, **extra: Any) -> dict:
     """Merge keys into a run's ``manifest["extra"]`` and rewrite it.
 
