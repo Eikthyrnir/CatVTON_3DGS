@@ -17,7 +17,8 @@ from . import metrics as M
 from .runio import RunConfig, RunWriter, load_run
 
 __all__ = ["run_orbit", "ensure_orbit", "score_run", "report_run", "compare_runs",
-           "infer_view_of", "backfill_view_of", "count_decoder_attn1", "VIEW_ORDER"]
+           "infer_view_of", "backfill_view_of", "count_decoder_attn1", "generating_stage",
+           "GENERATING_STAGE", "VIEW_ORDER"]
 
 #: Generation order over the orientation classes. **This order is load-bearing** (thesis 4.4.2).
 #: A reference pass clears the key/value bank and refills it, so every frame that consumes a bank
@@ -481,8 +482,7 @@ def report_run(run_dir: str | os.PathLike, garment_for=None, save: bool = True) 
             if w:
                 print(f" {stage:<12}{w['median_pct']:>+8.1f}%{w['q75_pct']:>+8.1f}%"
                       f"{w['n_frames']:>9}")
-        gen = "comp_mask" if cfg.get("mask_variant") == "composition" else "cloth_mask"
-        print(f" -> this run generates with {gen}")
+        print(f" -> this run generates with {generating_stage(cfg)}")
     else:
         print(" no width errors: the run has no densepose/ stage")
 
@@ -560,8 +560,13 @@ def compare_runs(
         row["consistency_mean"] = res["consistency"]["mean"]
         row["consistency_max"] = res["consistency"]["max"]
         row["detail_mean"] = (res.get("detail") or {}).get("mean")
-        comp = res["width_error"].get("comp_mask") or res["width_error"].get(mask_stage) or {}
-        row["width_median_pct"] = comp.get("median_pct")
+        # Measure each arm on the mask that actually generated it, not on a fixed stage: in the
+        # mask ablation the generating mask is a different artefact in every arm.
+        stage = generating_stage(cfg)
+        row["gen_mask"] = stage
+        width = res["width_error"].get(stage) or {}
+        row["width_median_pct"] = width.get("median_pct")
+        row["width_q75_pct"] = width.get("q75_pct")
         if res.get("boundaries") and res["boundaries"]["ratio"]:
             row["boundary_ratio"] = res["boundaries"]["ratio"]
 
@@ -590,6 +595,23 @@ def compare_runs(
     return rows
 
 
+#: Which mask actually drives generation, per mask variant. The width error of thesis Section 5.2.4
+#: is only comparable across the arms of the mask ablation if each arm is measured on the mask that
+#: produced its frames, which is a different stage in each arm.
+GENERATING_STAGE = {
+    "single_pass": "agnostic",       # no refinement: the wide cloth-agnostic mask generates
+    "no_composition": "cloth_mask",  # refined mask, used directly on the original frame
+    "erosion": "comp_mask",          # the contracted mask is stored in the comp_mask slot
+    "composition": "comp_mask",      # refined then dilated, the released pipeline
+}
+
+
+def generating_stage(config: dict | RunConfig) -> str:
+    """The artefact stage holding the mask that generated a run's frames."""
+    variant = (config.get("mask_variant") if isinstance(config, dict) else config.mask_variant)
+    return GENERATING_STAGE.get(variant, "comp_mask")
+
+
 def _print_table(rows: Sequence[dict], axes: Sequence[str]) -> None:
     """Fixed-width table of :func:`compare_runs` rows."""
     if not rows:
@@ -602,7 +624,9 @@ def _print_table(rows: Sequence[dict], axes: Sequence[str]) -> None:
         ("consistency_mean", "consist", 9, "{:>9.4f}"),
         ("consistency_max", "worst", 8, "{:>8.4f}"),
         ("detail_mean", "detail", 8, "{:>8.3f}"),
+        ("gen_mask", "genmask", 12, "{:>12}"),
         ("width_median_pct", "width%", 8, "{:>+8.1f}"),
+        ("width_q75_pct", "q75%", 8, "{:>+8.1f}"),
         ("mask_iou_vs_base", "maskIoU", 9, "{:>9.3f}"),
         ("mask_iou_min", "IoU min", 9, "{:>9.3f}"),
         ("lpips_vs_base", "LPIPS", 8, "{:>8.4f}"),

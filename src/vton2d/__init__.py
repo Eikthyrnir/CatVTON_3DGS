@@ -30,7 +30,7 @@ from .metrics import (
     mask_iou,
 )
 from .driver import (run_orbit, ensure_orbit, score_run, report_run, compare_runs,
-                     infer_view_of, backfill_view_of, count_decoder_attn1)
+                     infer_view_of, backfill_view_of, count_decoder_attn1, generating_stage)
 
 __all__ = [
     "STAGES",
@@ -46,6 +46,7 @@ __all__ = [
     "mask_iou",
     "report_run",
     "compare_runs",
+    "generating_stage",
     "infer_view_of",
     "backfill_view_of",
     "consistency_series",
@@ -61,4 +62,13 @@ __all__ = [
     "count_decoder_attn1",
 ]
 
+#: Stamped into every ``scores.json`` by :func:`vton2d.runio.save_scores`.
+#:
+#: **Bump this only when a metric's definition changes** — the histogram binning, the distance,
+#: the gradient normalisation, the width-error rows, or which mask a variant is scored on. It marks
+#: results as incomparable, so bumping it for an added function or a docstring would falsely
+#: condemn numbers that are still valid.
+#:
+#: 0.1.0  consistency (HSV 8x8x8, Bhattacharyya), detail statistic, width error, mask IoU.
+#:        Unchanged since the first reference corpus, so every score file to date is comparable.
 __version__ = "0.1.0"
