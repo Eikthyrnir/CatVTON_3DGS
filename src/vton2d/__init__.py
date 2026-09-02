@@ -28,6 +28,7 @@ from .metrics import (
     width_error,
     view_from_densepose,
     mask_iou,
+    garment_fidelity,
 )
 from .driver import (run_orbit, ensure_orbit, score_run, report_run, compare_runs,
                      infer_view_of, backfill_view_of, count_decoder_attn1, generating_stage)
@@ -44,6 +45,7 @@ __all__ = [
     "load_scores",
     "view_from_densepose",
     "mask_iou",
+    "garment_fidelity",
     "report_run",
     "compare_runs",
     "generating_stage",

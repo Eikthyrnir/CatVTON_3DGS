@@ -37,6 +37,7 @@ __all__ = [
     "aggregate_width_error",
     "view_from_densepose",
     "mask_iou",
+    "garment_fidelity",
     "pairwise_lpips_ssim",
 ]
 
@@ -255,6 +256,29 @@ def width_error(mask, densepose, torso_labels: Sequence[int] = TORSO_LABELS) -> 
         "n_rows_empty": int(n_empty),
         "torso_box_width_px": box_width,
     }
+
+
+def garment_fidelity(image, mask, garment_image, garment_mask=None, bins=HSV_BINS) -> float:
+    """Colour distance between the rendered garment and the photograph it was conditioned on.
+
+    The instrument §4.3.6's argument needs and the width error cannot supply. That section adopted
+    body-preserving composition because running the refinement pass on the *original* frame lets
+    the garment being replaced bleed into the generated one — a navy target desaturating toward the
+    cream shirt underneath. A mask-width measure is blind to that, and the detail statistic is
+    actively misleading, since bleed-through raises gradient energy exactly as retained texture does.
+
+    Bhattacharyya distance between the masked HSV histogram of the frame and that of the
+    conditioning photograph. Lower means the rendered garment's colours sit closer to the garment
+    it is supposed to be. It never reaches zero — lighting, pose and drape all differ from a
+    catalogue shot — so it is comparative between variants, like every other measure here.
+    """
+    if garment_mask is None:
+        garment_mask = _garment_foreground(garment_image)
+    return float(cv2.compareHist(
+        hsv_histogram(image, mask, bins),
+        hsv_histogram(garment_image, garment_mask, bins),
+        cv2.HISTCMP_BHATTACHARYYA,
+    ))
 
 
 def mask_iou(mask_a, mask_b) -> float:
