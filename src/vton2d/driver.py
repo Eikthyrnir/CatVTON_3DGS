@@ -43,6 +43,7 @@ def run_orbit(
     writer: RunWriter,
     parse_steps_for: int = 2,
     skip_existing: bool = False,
+    configure_fn: Callable[[RunConfig], None] | None = None,
     on_frame: Callable[[str, str, dict], None] | None = None,
     verbose: bool = True,
 ) -> dict:
@@ -65,6 +66,11 @@ def run_orbit(
     parse_steps_for
         Save the mask progression for this many frames per view class. Source material for
         ``fig:mask-stages``; saving it for every frame is wasteful.
+    configure_fn
+        Called once with `config` before any frame is generated, to install the attention
+        processors that realise ``config.injection`` and ``config.window``. Required for anything
+        but the released setting: without it those fields would reach the manifest without
+        reaching the model.
     skip_existing
         Generate only the frames whose ``final`` image is not already in the run directory. Use
         with ``RunWriter(..., resume=True)`` after a Colab runtime dies mid-orbit. The reference
@@ -73,18 +79,22 @@ def run_orbit(
 
     Returns a summary dict; the manifest is written before returning.
     """
-    if config.injection == "all":
-        raise NotImplementedError(
-            "injection='all' needs the layer set lifted out of ReferenceAttentionProcessor into "
-            "the config; it is not honoured yet and would silently run the 'decoder' variant. "
-            "Wire the layer restriction before running the layer ablation (experiment C2)."
-        )
-    if config.injection not in ("decoder", "none"):
+    if config.injection not in ("decoder", "all", "none"):
         raise ValueError(f"unknown injection mode {config.injection!r}")
-    if tuple(config.window) != (5, 45):
-        raise NotImplementedError(
-            f"window={tuple(config.window)} is recorded in the manifest but not yet applied: the "
-            "injection window lives in ReferenceAttentionProcessor. Wire it before the sweep (E7)."
+
+    if configure_fn is not None:
+        # The notebook installs the attention processors for this configuration. Done once per
+        # run rather than per frame, because the layer set is fixed at installation time.
+        configure_fn(config)
+    elif config.injection != "decoder" or tuple(config.window) != (5, 45):
+        # Without a configure_fn the processor keeps whatever it was last given, so a config
+        # asking for anything but the released setting would be recorded in the manifest and
+        # silently not applied. That is the one failure this refuses to allow.
+        raise ValueError(
+            f"injection={config.injection!r}, window={tuple(config.window)} differ from the "
+            f"released setting, but no configure_fn was supplied to apply them. Pass "
+            f"configure_fn=... (see install_reference_attention in the notebook), or the manifest "
+            f"would claim a configuration that was never run."
         )
 
     generated: list[str] = []
