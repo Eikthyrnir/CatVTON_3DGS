@@ -18,7 +18,7 @@ from .runio import RunConfig, RunWriter, load_run
 
 __all__ = ["run_orbit", "ensure_orbit", "score_run", "report_run", "compare_runs",
            "infer_view_of", "backfill_view_of", "count_decoder_attn1", "generating_stage",
-           "GENERATING_STAGE", "VIEW_ORDER"]
+           "parse_finals", "body_distortion", "GENERATING_STAGE", "VIEW_ORDER"]
 
 #: Generation order over the orientation classes. **This order is load-bearing** (thesis 4.4.2).
 #: A reference pass clears the key/value bank and refills it, so every frame that consumes a bank
@@ -658,6 +658,79 @@ def _print_table(rows: Sequence[dict], axes: Sequence[str]) -> None:
     print("\nconsist/worst: lower is better | detail ~1.0 = photograph-level texture")
     print("width%: composition mask against the DensePose torso, + means too wide")
     print("maskIoU: agreement of the cloth-specific mask with the baseline run")
+
+
+def parse_finals(
+    run_dir: str | os.PathLike,
+    parse_fn: Callable[["object"], "object"],
+    stage: str = "final_densepose",
+    skip_existing: bool = True,
+    verbose: bool = True,
+) -> int:
+    """Run a parser over a run's delivered frames and store the result as a new stage.
+
+    The runs hold DensePose for every *input* frame but not for the frames the pipeline produced,
+    so nothing on disk can answer a question about the rendered body. This adds that side. It is a
+    parsing pass, not a generation pass — no diffusion — so it is cheap to apply to every run that
+    already exists.
+
+    `parse_fn` takes a PIL image and returns the parse to store, e.g.
+    ``lambda img: automasker(img)["densepose"]``.
+    """
+    from PIL import Image
+
+    root = Path(run_dir)
+    out = root / stage
+    out.mkdir(parents=True, exist_ok=True)
+    finals = sorted((root / "final").glob("*.png"))
+    n = 0
+    for path in finals:
+        target = out / path.name
+        if skip_existing and target.exists():
+            continue
+        parsed = parse_fn(Image.open(path).convert("RGB"))
+        parsed.convert("L").save(target)
+        n += 1
+    if verbose:
+        print(f"{root.name}: parsed {n} frame(s) into {stage}/ "
+              f"({len(finals) - n} already present)")
+    return n
+
+
+def body_distortion(
+    run_dir: str | os.PathLike,
+    frames: Iterable[str] | None = None,
+    stage: str = "final_densepose",
+    verbose: bool = True,
+) -> dict:
+    """Compare the rendered subject's torso against the captured one, over a run.
+
+    Requires :func:`parse_finals` to have been run first. Answers the geometric questions the
+    colour measures cannot: whether the pipeline renders a body of the wrong width, and by how
+    much (thesis §4.3.7, §4.4.4).
+    """
+    from .runio import load_run
+
+    run = load_run(run_dir)
+    path = run["path"]
+    names = sorted(frames if frames is not None else run["frames"])
+    per_frame = []
+    for n in names:
+        gen, ref = path(stage, n), path("densepose", n)
+        if not (Path(gen).exists() and Path(ref).exists()):
+            continue
+        per_frame.append(M.body_width_shift(gen, ref))
+    result = M.aggregate_body_shift(per_frame)
+    result["run_dir"] = Path(run_dir)
+    result["config"] = run["config"]
+    if verbose:
+        if result["n_frames"]:
+            print(f"{Path(run_dir).name:<46} body width  signed {result['median_pct']:+6.1f}%   "
+                  f"absolute {result['abs_median_pct']:5.1f}%   worst {result['worst_abs_pct']:5.1f}%"
+                  f"   over {result['n_frames']} frames")
+        else:
+            print(f"{Path(run_dir).name}: no comparable frames — run parse_finals first")
+    return result
 
 
 def count_decoder_attn1(unet, verbose: bool = True) -> dict:

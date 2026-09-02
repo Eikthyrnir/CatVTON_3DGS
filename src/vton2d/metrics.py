@@ -38,6 +38,8 @@ __all__ = [
     "view_from_densepose",
     "mask_iou",
     "garment_fidelity",
+    "body_width_shift",
+    "aggregate_body_shift",
     "pairwise_lpips_ssim",
 ]
 
@@ -255,6 +257,81 @@ def width_error(mask, densepose, torso_labels: Sequence[int] = TORSO_LABELS) -> 
         "n_rows": int(e.size),
         "n_rows_empty": int(n_empty),
         "torso_box_width_px": box_width,
+    }
+
+
+def body_width_shift(
+    densepose_generated,
+    densepose_original,
+    torso_labels: Sequence[int] = TORSO_LABELS,
+) -> dict | None:
+    """How much the subject's torso changed width between a generated frame and its capture.
+
+    The geometric counterpart to :func:`width_error`. That one asks whether a *mask* is wider than
+    the body; this one asks whether the *rendered body* is wider than the one photographed, by
+    comparing the DensePose torso of the generated frame against the DensePose torso of the frame
+    it was generated from.
+
+    Two questions in the thesis need it and neither of the colour measures can answer them. §4.3.7
+    asks whether the refinement pass moves the body inside the composition mask. §4.4.4 asserts
+    that unrestricted injection produces "individually distorted" frames — a claim about geometry,
+    which a histogram over the garment region cannot detect, since a warped frame can be perfectly
+    colour-consistent.
+
+    Rows are compared only where both frames report a torso, so a frame whose parse fails on one
+    side contributes nothing rather than a spurious extreme. Returns ``None`` when they share no
+    torso rows, which happens on strongly lateral views.
+    """
+    dp_gen = np.asarray(_open(densepose_generated).convert("L"))
+    dp_ref = np.asarray(_open(densepose_original).convert("L"))
+    if dp_gen.shape[:2] != dp_ref.shape[:2]:
+        dp_gen = _resize_mask_to(dp_gen, dp_ref.shape[:2])
+
+    torso_gen = np.isin(dp_gen, list(torso_labels))
+    torso_ref = np.isin(dp_ref, list(torso_labels))
+    if not (torso_gen.any() and torso_ref.any()):
+        return None
+
+    rows = np.flatnonzero(torso_gen.any(axis=1) & torso_ref.any(axis=1))
+    if rows.size == 0:
+        return None
+
+    shifts = []
+    for y in rows:
+        g = np.flatnonzero(torso_gen[y])
+        r = np.flatnonzero(torso_ref[y])
+        w_ref = float(r[-1] - r[0] + 1)
+        if w_ref <= 0:
+            continue
+        shifts.append((float(g[-1] - g[0] + 1) - w_ref) / w_ref)
+
+    if not shifts:
+        return None
+    s = np.asarray(shifts, dtype=np.float64)
+    return {
+        "median_pct": float(np.median(s) * 100.0),
+        "q75_pct": float(np.percentile(s, 75) * 100.0),
+        "abs_median_pct": float(np.median(np.abs(s)) * 100.0),
+        "n_rows": int(s.size),
+    }
+
+
+def aggregate_body_shift(per_frame: Iterable[dict | None]) -> dict:
+    """Combine :func:`body_width_shift` over an orbit, ignoring frames without a shared torso.
+
+    ``abs_median_pct`` is the one to read for distortion: a body that is too wide on some frames
+    and too narrow on others averages to nothing under the signed median while being badly wrong
+    on every frame.
+    """
+    kept = [r for r in per_frame if r]
+    if not kept:
+        return {"median_pct": float("nan"), "abs_median_pct": float("nan"), "n_frames": 0}
+    return {
+        "median_pct": float(np.median([r["median_pct"] for r in kept])),
+        "q75_pct": float(np.median([r["q75_pct"] for r in kept])),
+        "abs_median_pct": float(np.median([r["abs_median_pct"] for r in kept])),
+        "worst_abs_pct": float(np.max([r["abs_median_pct"] for r in kept])),
+        "n_frames": len(kept),
     }
 
 

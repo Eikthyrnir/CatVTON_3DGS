@@ -29,9 +29,11 @@ from .metrics import (
     view_from_densepose,
     mask_iou,
     garment_fidelity,
+    body_width_shift,
 )
 from .driver import (run_orbit, ensure_orbit, score_run, report_run, compare_runs,
-                     infer_view_of, backfill_view_of, count_decoder_attn1, generating_stage)
+                     infer_view_of, backfill_view_of, count_decoder_attn1, generating_stage,
+                     parse_finals, body_distortion)
 
 __all__ = [
     "STAGES",
@@ -46,6 +48,9 @@ __all__ = [
     "view_from_densepose",
     "mask_iou",
     "garment_fidelity",
+    "body_width_shift",
+    "parse_finals",
+    "body_distortion",
     "report_run",
     "compare_runs",
     "generating_stage",
