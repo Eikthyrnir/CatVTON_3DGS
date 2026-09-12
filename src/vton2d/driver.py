@@ -133,9 +133,14 @@ def run_orbit(
         return saved_steps
 
     def note(person_path: str, view: str) -> None:
-        """Record a frame that is already on disk, without regenerating it."""
+        """Record a frame that is already on disk, without regenerating it.
+
+        Registered with the writer as well: the manifest is written from the writer's list, so a
+        reused frame that only reached `generated` would be on disk but missing from the manifest.
+        """
         stem = Path(person_path).stem
         view_of[stem] = view
+        writer.register(stem)
         if stem not in generated:
             generated.append(stem)
 
@@ -627,9 +632,20 @@ def _print_table(rows: Sequence[dict], axes: Sequence[str]) -> None:
     if not rows:
         print("no runs to compare")
         return
-    cols = [
-        (a, a.replace("coarse_steps", "T1").replace("fine_steps", "T2"), 5, "{:>5}") for a in axes
-    ] + [
+    def axis_text(v):
+        # Config values arrive from JSON, so a window tuple comes back as a list, and a plain
+        # "{:>5}" format raises on it.
+        if isinstance(v, (list, tuple)):
+            return "[" + ",".join(str(x) for x in v) + "]"
+        return "" if v is None else str(v)
+
+    axis_cols = []
+    for a in axes:
+        label = a.replace("coarse_steps", "T1").replace("fine_steps", "T2")
+        width = max([len(label)] + [len(axis_text(r.get(a))) for r in rows]) + 2
+        axis_cols.append((a, label, width, None))
+
+    cols = axis_cols + [
         ("n", "n", 4, "{:>4}"),
         ("consistency_mean", "consist", 9, "{:>9.4f}"),
         ("consistency_max", "worst", 8, "{:>8.4f}"),
@@ -653,7 +669,10 @@ def _print_table(rows: Sequence[dict], axes: Sequence[str]) -> None:
         line = ""
         for key, _, w, fmt in present:
             v = r.get(key)
-            line += fmt.format(v) if v is not None else " " * w
+            if fmt is None:
+                line += f"{axis_text(v):>{w}}"
+            else:
+                line += fmt.format(v) if v is not None else " " * w
         print(line)
     print("\nconsist/worst: lower is better | detail ~1.0 = photograph-level texture")
     print("width%: composition mask against the DensePose torso, + means too wide")

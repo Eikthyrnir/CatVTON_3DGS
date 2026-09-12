@@ -17,7 +17,7 @@ Usage from the notebook::
 """
 
 from .runio import (STAGES, RunConfig, RunWriter, load_run, list_runs, export_stage,
-                    update_manifest, save_scores, load_scores)
+                    update_manifest, save_scores, load_scores, repair_frames)
 from .metrics import (
     consistency_series,
     consistency_pair,
@@ -45,6 +45,7 @@ __all__ = [
     "update_manifest",
     "save_scores",
     "load_scores",
+    "repair_frames",
     "view_from_densepose",
     "mask_iou",
     "garment_fidelity",

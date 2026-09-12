@@ -160,6 +160,16 @@ class RunWriter:
         """Whether this run already holds `stage` for `name`."""
         return (self.root / stage / f"{self._stem(name)}.png").exists()
 
+    def register(self, name: str) -> None:
+        """List a frame in the manifest without writing any artefact for it.
+
+        For frames reused from disk on resume. Without this they exist as files but are absent from
+        the manifest, and anything reading the frame list from the manifest skips them.
+        """
+        stem = self._stem(name)
+        if stem not in self._frames:
+            self._frames.append(stem)
+
     # -- writing -----------------------------------------------------------
 
     @staticmethod
@@ -231,7 +241,14 @@ def load_run(run_dir: str | os.PathLike) -> dict:
     if not manifest_path.exists():
         raise FileNotFoundError(f"no manifest.json in {root}; is this a run directory?")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    frames = manifest.get("frames") or sorted(p.stem for p in (root / "final").glob("*.png"))
+
+    # The files are the ground truth, not the manifest's list. A resumed run that reused frames
+    # from an interrupted attempt could write a manifest omitting them, and trusting that list
+    # would silently drop artefacts that are sitting on disk.
+    listed = set(manifest.get("frames") or [])
+    on_disk = ({p.stem for p in (root / "final").glob("*.png")}
+               if (root / "final").is_dir() else set())
+    frames = sorted(listed | on_disk)
 
     def path(stage: str, frame: str) -> Path:
         return root / stage / f"{Path(frame).stem}.png"
@@ -241,8 +258,36 @@ def load_run(run_dir: str | os.PathLike) -> dict:
         "config": manifest.get("config", {}),
         "manifest": manifest,
         "frames": frames,
+        "unlisted_frames": sorted(on_disk - listed),
         "path": path,
     }
+
+
+def repair_frames(run_dir: str | os.PathLike, verbose: bool = True) -> list[str]:
+    """Rewrite a manifest's frame list to match the final images actually on disk.
+
+    For runs written before the resume path registered reused frames. :func:`load_run` already
+    reconciles on read; this makes the file itself honest, so nothing that reads the manifest
+    directly is misled either.
+    """
+    root = Path(run_dir)
+    path = root / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    listed = set(manifest.get("frames") or [])
+    on_disk = {p.stem for p in (root / "final").glob("*.png")}
+    added = sorted(on_disk - listed)
+    if added:
+        manifest["frames"] = sorted(listed | on_disk)
+        manifest.setdefault("amended_utc", []).append({
+            "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "keys": ["frames"],
+            "added_frames": added,
+        })
+        path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if verbose:
+        print(f"{root.name}: " + (f"added {len(added)} unlisted frame(s) {added}" if added
+                                   else "manifest already complete"))
+    return added
 
 
 def _jsonable(obj: Any) -> Any:
