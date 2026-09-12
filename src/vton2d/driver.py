@@ -575,6 +575,22 @@ def compare_runs(
         row["consistency_mean"] = res["consistency"]["mean"]
         row["consistency_max"] = res["consistency"]["max"]
         row["detail_mean"] = (res.get("detail") or {}).get("mean")
+
+        # Garment colour fidelity (thesis eq:fidelity). The only column that can see colour bleed:
+        # bleed raises gradient energy like retained texture does, so detail cannot. Scored over
+        # `mask_stage` in every row, so the region is identical and only the rendered pixels differ.
+        if garment_for is not None:
+            fid_frames = sorted(shared_set) if shared_set else run["frames"]
+            fids = []
+            for n in fid_frames:
+                try:
+                    fids.append(M.garment_fidelity(run["path"]("final", n),
+                                                   run["path"](mask_stage, n),
+                                                   garment_for(n)))
+                except (ValueError, FileNotFoundError):
+                    pass
+            if fids:
+                row["fidelity_mean"] = float(np.mean(fids))
         # Measure each arm on the mask that actually generated it, not on a fixed stage: in the
         # mask ablation the generating mask is a different artefact in every arm.
         stage = generating_stage(cfg)
@@ -650,6 +666,7 @@ def _print_table(rows: Sequence[dict], axes: Sequence[str]) -> None:
         ("consistency_mean", "consist", 9, "{:>9.4f}"),
         ("consistency_max", "worst", 8, "{:>8.4f}"),
         ("detail_mean", "detail", 8, "{:>8.3f}"),
+        ("fidelity_mean", "fidelity", 10, "{:>10.4f}"),
         ("gen_mask", "genmask", 12, "{:>12}"),
         ("width_median_pct", "width%", 8, "{:>+8.1f}"),
         ("width_q75_pct", "q75%", 8, "{:>+8.1f}"),
@@ -677,6 +694,7 @@ def _print_table(rows: Sequence[dict], axes: Sequence[str]) -> None:
     print("\nconsist/worst: lower is better | detail ~1.0 = photograph-level texture")
     print("width%: composition mask against the DensePose torso, + means too wide")
     print("maskIoU: agreement of the cloth-specific mask with the baseline run")
+    print("fidelity: colour distance to the conditioning photograph, lower is closer")
 
 
 def parse_finals(
