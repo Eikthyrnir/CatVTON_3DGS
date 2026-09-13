@@ -63,8 +63,12 @@ class RunConfig:
     # --- generation -------------------------------------------------------
     coarse_steps: int = 50          # T_1
     fine_steps: int = 50            # T_2
-    guidance_scale: float = 2.5     # target frames and the dorsal reference
-    ref_guidance_scale: float = 5.0 # frontal reference only; see tab:config
+    guidance_scale: float = 2.5     # every pass not raised by ref_guidance_views
+    ref_guidance_scale: float = 5.0 # reference passes of the classes in ref_guidance_views
+    # Classes whose reference pass runs at ref_guidance_scale. The released configuration raises
+    # only the frontal reference (tab:config); E5 varies this to separate guidance from viewpoint.
+    # Lateral frames are each their own reference pass, so listing "side" raises every one of them.
+    ref_guidance_views: tuple[str, ...] = ("front",)
     mask_dilate: int = 14           # rho, in px
     seed: int = 42
     resolution: tuple[int, int] = (768, 1024)

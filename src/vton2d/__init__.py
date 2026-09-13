@@ -31,13 +31,15 @@ from .metrics import (
     garment_fidelity,
     foreground_fraction,
     garment_region,
+    catalogue_garment_region,
     colour_shift,
+    outside_mask_change,
     body_width_shift,
 )
 from .driver import (run_orbit, ensure_orbit, score_run, report_run, compare_runs,
                      infer_view_of, backfill_view_of, count_decoder_attn1, generating_stage,
                      parse_finals, body_distortion, ensure_garment_masks, garment_lookup,
-                     colour_by_class)
+                     colour_by_class, outside_change_by_class)
 
 __all__ = [
     "STAGES",
@@ -55,7 +57,10 @@ __all__ = [
     "garment_fidelity",
     "foreground_fraction",
     "garment_region",
+    "catalogue_garment_region",
     "colour_shift",
+    "outside_mask_change",
+    "outside_change_by_class",
     "body_width_shift",
     "parse_finals",
     "body_distortion",

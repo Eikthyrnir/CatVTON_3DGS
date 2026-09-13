@@ -10,16 +10,20 @@ Nothing here imports torch, diffusers or CatVTON. The notebook passes ``two_phas
 from __future__ import annotations
 
 import os
+from dataclasses import MISSING, fields
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from . import metrics as M
 from .runio import RunConfig, RunWriter, load_run
 
+#: RunConfig defaults, for manifests written before a field existed: such a run behaved as the default.
+_CONFIG_DEFAULTS = {f.name: f.default for f in fields(RunConfig) if f.default is not MISSING}
+
 __all__ = ["run_orbit", "ensure_orbit", "score_run", "report_run", "compare_runs",
            "infer_view_of", "backfill_view_of", "count_decoder_attn1", "generating_stage",
            "parse_finals", "body_distortion", "ensure_garment_masks", "garment_lookup",
-           "colour_by_class", "GENERATING_STAGE", "VIEW_ORDER"]
+           "colour_by_class", "outside_change_by_class", "GENERATING_STAGE", "VIEW_ORDER"]
 
 #: Generation order over the orientation classes. **This order is load-bearing** (thesis 4.4.2).
 #: A reference pass clears the key/value bank and refills it, so every frame that consumes a bank
@@ -105,7 +109,8 @@ def run_orbit(
 
     def call(person_path: str, view: str, is_ref: bool, saved_steps: int) -> int:
         person_img = _load_person(person_path, config.resolution)
-        guidance = config.ref_guidance_scale if (is_ref and view == "front") else config.guidance_scale
+        guidance = (config.ref_guidance_scale if (is_ref and view in tuple(config.ref_guidance_views))
+                    else config.guidance_scale)
         artefacts = tryon_fn(
             person_img,
             garments[view],
@@ -446,8 +451,9 @@ def report_run(run_dir: str | os.PathLike, garment_for=None, save: bool = True,
     print("=" * W)
     print(f" subject / garment  {cfg.get('subject','?')} / {cfg.get('garment','?')}")
     print(f" steps T1 / T2      {cfg.get('coarse_steps')} / {cfg.get('fine_steps')}")
-    print(f" guidance           {cfg.get('guidance_scale')}  (frontal reference "
-          f"{cfg.get('ref_guidance_scale')})")
+    ref_views = cfg.get("ref_guidance_views", _CONFIG_DEFAULTS["ref_guidance_views"])
+    print(f" guidance           {cfg.get('guidance_scale')}  (reference passes of "
+          f"{', '.join(ref_views) if ref_views else 'no class'} at {cfg.get('ref_guidance_scale')})")
     print(f" mask variant       {cfg.get('mask_variant')}   dilation {cfg.get('mask_dilate')} px")
     print(f" injection          {cfg.get('injection')}   window {cfg.get('window')}")
     print(f" seed / resolution  {cfg.get('seed')} / {tuple(cfg.get('resolution', ()))}")
@@ -588,7 +594,7 @@ def compare_runs(
 
         row: dict = {"run_id": cfg.get("run_id", Path(run_dir).name)}
         for axis in axes:
-            row[axis] = cfg.get(axis)
+            row[axis] = cfg.get(axis, _CONFIG_DEFAULTS.get(axis))
         row["n"] = res["n_frames"]
         row["consistency_mean"] = res["consistency"]["mean"]
         row["consistency_max"] = res["consistency"]["max"]
@@ -796,7 +802,7 @@ def ensure_garment_masks(
     run_dir: str | os.PathLike,
     parse_fn: Callable[["object"], "object"] | None,
     views: Sequence[str] = ("front", "side", "back"),
-    force: bool = False,
+    refresh: bool = False,
     verbose: bool = True,
 ) -> dict[str, str]:
     """Store the garment region of each conditioning photograph a run was generated from.
@@ -807,10 +813,11 @@ def ensure_garment_masks(
     (:func:`vton2d.metrics.garment_region`). A parsing pass with no diffusion, so it is cheap to
     apply to runs that already exist.
 
-    `parse_fn` takes the PIL photograph and returns its upper-clothes parse, or ``None``; with the
-    notebook's automasker, ``lambda img: extract_upper_clothes_mask(automasker(img))``. Returns
-    ``{view: source}`` with source ``"parsed"``, ``"backdrop heuristic"``, or ``"present"`` for a
-    region already on disk.
+    `parse_fn` takes the PIL photograph and returns either ``(mask, source)``, as
+    :func:`vton2d.metrics.catalogue_garment_region` does, or a bare upper-clothes parse (or ``None``)
+    for :func:`vton2d.metrics.garment_region` to choose from. Returns ``{view: source}``, with
+    ``"present"`` for a region already on disk. ``refresh`` recomputes those as well; it rewrites only
+    the ``garment/<view>_mask.png`` files and never touches a generated frame.
     """
     from PIL import Image
 
@@ -820,12 +827,15 @@ def ensure_garment_masks(
         photo_path, mask_path = root / f"{view}.png", root / f"{view}_mask.png"
         if not photo_path.exists():
             continue
-        if mask_path.exists() and not force:
+        if mask_path.exists() and not refresh:
             out[view] = "present"
             continue
         photo = Image.open(photo_path).convert("RGB")
         parse = parse_fn(photo) if parse_fn is not None else None
-        mask, source = M.garment_region(photo, parse, return_source=True)
+        if isinstance(parse, tuple):
+            mask, source = M.as_mask(parse[0]), parse[1]
+        else:
+            mask, source = M.garment_region(photo, parse, return_source=True)
         Image.fromarray(mask).save(mask_path)
         out[view] = source
         if verbose:
@@ -875,8 +885,12 @@ def colour_by_class(
     frames: Iterable[str] | None = None,
     mask_stage: str = "cloth_mask",
     verbose: bool = True,
+    stage: str = "final",
 ) -> dict:
     """Colour against the conditioning photograph, per orientation class (thesis §6.2).
+
+    ``stage="coarse"`` scores the Phase-1 output over the same region instead of the delivered frame,
+    which is what §6.2's statement about the refinement pass on dorsal frames needs.
 
     For every frame, :func:`vton2d.metrics.colour_shift` and :func:`vton2d.metrics.garment_fidelity`
     against the photograph of that frame's class, both over the stored garment region, which must
@@ -897,17 +911,18 @@ def colour_by_class(
 
     rows = []
     for n in names:
-        final, mask = path("final", n), path(mask_stage, n)
-        if not (Path(final).exists() and Path(mask).exists()):
+        image, mask = path(stage, n), path(mask_stage, n)
+        if not (Path(image).exists() and Path(mask).exists()):
             continue
         try:
-            shift = M.colour_shift(final, mask, garment_for(n), mask_for(n))
-            fid = M.garment_fidelity(final, mask, garment_for(n), mask_for(n))
+            shift = M.colour_shift(image, mask, garment_for(n), mask_for(n))
+            fid = M.garment_fidelity(image, mask, garment_for(n), mask_for(n))
         except ValueError:
             continue
         rows.append({"frame": Path(n).stem, "view": views.get(Path(n).stem), "fidelity": fid, **shift})
 
-    keys = ("d_value", "d_saturation", "fidelity", "value", "ref_value", "saturation", "ref_saturation")
+    keys = ("d_value", "d_saturation", "fidelity", "lighter_share", "greyer_share",
+            "value", "ref_value", "saturation", "ref_saturation")
     by_class = {}
     for cls in ("front", "side", "back"):
         sel = [r for r in rows if r["view"] == cls]
@@ -916,20 +931,74 @@ def colour_by_class(
     penalty = None
     if "front" in by_class and "back" in by_class:
         penalty = {k: by_class["back"][k] - by_class["front"][k]
-                   for k in ("d_value", "d_saturation", "fidelity")}
+                   for k in ("d_value", "d_saturation", "fidelity", "lighter_share", "greyer_share")}
 
-    result = {"run_dir": Path(run_dir), "garment": run["config"].get("garment"), "frames": rows,
-              "by_class": by_class, "dorsal_minus_frontal": penalty}
+    result = {"run_dir": Path(run_dir), "garment": run["config"].get("garment"), "stage": stage,
+              "frames": rows, "by_class": by_class, "dorsal_minus_frontal": penalty}
     if verbose:
-        print(f"{Path(run_dir).name}   ({len(rows)} frames, garment {result['garment']})")
-        print(f"  {'class':<7}{'n':>4}{'dV':>8}{'dS':>8}{'fidelity':>10}   V frame/photo   S frame/photo")
+        print(f"{Path(run_dir).name}   ({stage}, {len(rows)} frames, garment {result['garment']})")
+        print(f"  {'class':<7}{'n':>4}{'dV':>8}{'dS':>8}{'fidelity':>10}{'lighter':>9}{'greyer':>8}"
+              f"   V frame/photo   S frame/photo")
         for cls, c in by_class.items():
             print(f"  {cls:<7}{c['n']:>4}{c['d_value']:>+8.1f}{c['d_saturation']:>+8.1f}"
-                  f"{c['fidelity']:>10.3f}   {c['value']:5.0f} / {c['ref_value']:<5.0f}"
+                  f"{c['fidelity']:>10.3f}{c['lighter_share']:>9.1%}{c['greyer_share']:>8.1%}"
+                  f"   {c['value']:5.0f} / {c['ref_value']:<5.0f}"
                   f"  {c['saturation']:5.0f} / {c['ref_saturation']:<5.0f}")
         if penalty:
             print(f"  {'back-front':<11}{penalty['d_value']:>+8.1f}{penalty['d_saturation']:>+8.1f}"
-                  f"{penalty['fidelity']:>+10.3f}")
+                  f"{penalty['fidelity']:>+10.3f}{penalty['lighter_share']:>+9.1%}"
+                  f"{penalty['greyer_share']:>+8.1%}")
+        print("  lighter / greyer: share of garment pixels lighter than the photograph's lightest 5 %,"
+              " greyer than its greyest 5 %")
+    return result
+
+
+def outside_change_by_class(
+    run_dir: str | os.PathLike,
+    frames: Iterable[str] | None = None,
+    margin: int = 15,
+    verbose: bool = True,
+) -> dict:
+    """What the refinement pass changed outside the composition mask, per orientation class (§6.2).
+
+    :func:`vton2d.metrics.outside_mask_change` between the delivered frame and the pass's own input
+    (``composite``, which outside ``comp_mask`` is the captured frame), beyond ``margin`` px of the
+    mask. At the released guidance this is the autoencoder round trip alone; §6.2's account of raised
+    guidance predicts it grows. Runs without a composite (the single-pass arm) yield no classes.
+    """
+    import numpy as np
+
+    run = load_run(run_dir)
+    path = run["path"]
+    views = run["manifest"].get("extra", {}).get("view_of") or infer_view_of(run_dir)
+    names = sorted(frames if frames is not None else run["frames"])
+
+    rows = []
+    for n in names:
+        final, comp, mask = path("final", n), path("composite", n), path("comp_mask", n)
+        if not all(Path(p).exists() for p in (final, comp, mask)):
+            continue
+        try:
+            change = M.outside_mask_change(final, comp, mask, margin=margin)
+        except ValueError:
+            continue
+        rows.append({"frame": Path(n).stem, "view": views.get(Path(n).stem), **change})
+
+    keys = ("grain_ratio", "abs_diff", "d_saturation")
+    by_class = {}
+    for cls in ("front", "side", "back"):
+        sel = [r for r in rows if r["view"] == cls]
+        if sel:
+            by_class[cls] = {"n": len(sel), **{k: float(np.median([r[k] for r in sel])) for k in keys}}
+
+    result = {"run_dir": Path(run_dir), "margin": margin, "frames": rows, "by_class": by_class}
+    if verbose:
+        print(f"{Path(run_dir).name}   (outside comp_mask + {margin} px, {len(rows)} frames)")
+        print(f"  {'class':<7}{'n':>4}{'grain':>9}{'|diff|':>9}{'dS':>8}")
+        for cls, c in by_class.items():
+            print(f"  {cls:<7}{c['n']:>4}{c['grain_ratio']:>9.3f}{c['abs_diff']:>9.2f}"
+                  f"{c['d_saturation']:>+8.1f}")
+        print("  grain: output over input gradient energy, 1.0 = unchanged; |diff| on 0-255")
     return result
 
 

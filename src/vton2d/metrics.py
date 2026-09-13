@@ -40,7 +40,9 @@ __all__ = [
     "garment_fidelity",
     "foreground_fraction",
     "garment_region",
+    "catalogue_garment_region",
     "colour_shift",
+    "outside_mask_change",
     "body_width_shift",
     "aggregate_body_shift",
     "pairwise_lpips_ssim",
@@ -415,22 +417,112 @@ def colour_shift(image, mask, garment_image, garment_mask) -> dict:
     lighting differs from catalogue lighting, so neither number sits at zero for a good result:
     they are read between orientation classes of the same garment.
 
+    Medians describe a shift of the whole garment and cannot see a patch: a washed-out region over a
+    third of the back leaves them where they were. ``lighter_share`` and ``greyer_share`` cover that
+    case, as the share of the rendered garment lighter than the lightest 5 % of the photograph's
+    garment and greyer than its greyest 5 %. The photograph's own extremes include its print, so a
+    pixel counted there lies outside every colour the garment actually has.
+
     `garment_mask` has no default. The backdrop heuristic is wrong for most on-model photographs
     (:func:`garment_region`), and a colour statistic over skin, trousers and wall would describe
     those instead of the garment.
     """
-    def medians(img, msk):
+    def channels(img, msk):
         bgr = as_bgr(img)
         m = _resize_mask_to(as_mask(msk), bgr.shape[:2]) > 0
         if not m.any():
             raise ValueError("empty mask: no pixels to take a median over")
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        return float(np.median(hsv[..., 2][m])), float(np.median(hsv[..., 1][m]))
+        return hsv[..., 2][m].astype(np.float64), hsv[..., 1][m].astype(np.float64)
 
-    v, s = medians(image, mask)
-    v_ref, s_ref = medians(garment_image, garment_mask)
-    return {"value": v, "saturation": s, "ref_value": v_ref, "ref_saturation": s_ref,
-            "d_value": v - v_ref, "d_saturation": s - s_ref}
+    v, s = channels(image, mask)
+    v_ref, s_ref = channels(garment_image, garment_mask)
+    out = {"value": float(np.median(v)), "saturation": float(np.median(s)),
+           "ref_value": float(np.median(v_ref)), "ref_saturation": float(np.median(s_ref))}
+    out["d_value"] = out["value"] - out["ref_value"]
+    out["d_saturation"] = out["saturation"] - out["ref_saturation"]
+    out["lighter_share"] = float((v > np.percentile(v_ref, 95)).mean())
+    out["greyer_share"] = float((s < np.percentile(s_ref, 5)).mean())
+    return out
+
+
+LIP_UPPER_CLOTHES = 5   # SCHP, LIP label set
+ATR_UPPER_CLOTHES = 4   # SCHP, ATR label set
+
+
+def _label_map(labels, shape: tuple[int, int]) -> np.ndarray:
+    """A parser's label map as uint8 indices. No mode conversion: a palette image holds indices."""
+    arr = np.asarray(_open(labels))
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    return _resize_mask_to(arr.astype(np.uint8), shape)
+
+
+def catalogue_garment_region(photo, densepose, schp_lip, schp_atr, min_fraction: float = 0.02,
+                             min_person: float = 0.01) -> tuple[np.ndarray, str]:
+    """The garment region of a catalogue photograph, from the parses the automasker produces anyway.
+
+    Decided in order:
+
+    * **No person** (DensePose covers under ``min_person`` of the frame): a flat-lay packshot. The
+      human parsers are outside their domain there and label part of the garment at best, while
+      the near-white backdrop heuristic is exactly right on a packshot's white sweep.
+    * **Both parsers agree** on upper-clothes over at least ``min_fraction`` of the frame: their
+      intersection. Taking the larger of the two instead systematically picks whichever parser
+      over-segments, and on an on-model photograph that means bare arms labelled as sleeve, which
+      makes a colour statistic over the region partly a statistic of skin.
+    * Otherwise the larger single parse, and failing that the backdrop heuristic.
+
+    Returns ``(mask, source)``, the mask in {0, 255} at the photograph's resolution.
+    """
+    shape = as_bgr(photo).shape[:2]
+    if (_label_map(densepose, shape) > 0).mean() < min_person:
+        return _garment_foreground(photo), "no person: backdrop heuristic"
+    lip = _label_map(schp_lip, shape) == LIP_UPPER_CLOTHES
+    atr = _label_map(schp_atr, shape) == ATR_UPPER_CLOTHES
+    both = lip & atr
+    if both.mean() >= min_fraction:
+        return both.astype(np.uint8) * 255, "parsed: LIP and ATR agree"
+    single = lip if lip.sum() >= atr.sum() else atr
+    if single.mean() >= min_fraction:
+        return single.astype(np.uint8) * 255, "parsed: one parser only"
+    return _garment_foreground(photo), "backdrop heuristic"
+
+
+def outside_mask_change(image, reference, mask, margin: int = 15) -> dict:
+    """What a generated frame changed outside the region it was asked to repaint.
+
+    §6.2 places the cost of raised guidance on the whole canvas: the autoencoder decodes every pixel,
+    so overshoot appears as grain and saturation in the face and background as well as the garment.
+    ``two_phase_tryon`` stores the pipeline's output as the delivered frame without pasting it back,
+    so the delivered frame carries any such change. Measured against the pass's own input, beyond
+    ``margin`` px of the mask so the feathered seam is not counted:
+
+    * ``abs_diff``      mean absolute RGB difference, 0-255
+    * ``grain_ratio``   mean gradient magnitude of the output over that of the input; 1.0 = unchanged
+    * ``d_saturation``  median HSV saturation of the output minus that of the input
+    """
+    a_bgr, b_bgr = as_bgr(image), as_bgr(reference)
+    if a_bgr.shape != b_bgr.shape:
+        raise ValueError(f"image {a_bgr.shape} and reference {b_bgr.shape} differ in size")
+    m = _resize_mask_to(as_mask(mask), a_bgr.shape[:2])
+    k = 2 * margin + 1
+    outside = cv2.dilate(m, np.ones((k, k), np.uint8)) == 0
+    if not outside.any():
+        raise ValueError("no pixels outside the mask and its margin")
+    region = outside.astype(np.uint8) * 255
+    diff = np.abs(a_bgr.astype(np.float32) - b_bgr.astype(np.float32))[outside].mean()
+    g_out, g_in = gradient_magnitude_mean(image, region), gradient_magnitude_mean(reference, region)
+    if g_in > 1e-6:
+        grain = g_out / g_in
+    else:
+        # A flat input region has no gradient to normalise by: flat in both is unchanged, and any
+        # structure added to it is unbounded relative to none.
+        grain = 1.0 if g_out <= 1e-6 else float("inf")
+    s_a = cv2.cvtColor(a_bgr, cv2.COLOR_BGR2HSV)[..., 1][outside]
+    s_b = cv2.cvtColor(b_bgr, cv2.COLOR_BGR2HSV)[..., 1][outside]
+    return {"abs_diff": float(diff), "grain_ratio": float(grain),
+            "d_saturation": float(np.median(s_a)) - float(np.median(s_b))}
 
 
 def mask_iou(mask_a, mask_b) -> float:
