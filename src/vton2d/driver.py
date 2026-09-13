@@ -18,7 +18,8 @@ from .runio import RunConfig, RunWriter, load_run
 
 __all__ = ["run_orbit", "ensure_orbit", "score_run", "report_run", "compare_runs",
            "infer_view_of", "backfill_view_of", "count_decoder_attn1", "generating_stage",
-           "parse_finals", "body_distortion", "GENERATING_STAGE", "VIEW_ORDER"]
+           "parse_finals", "body_distortion", "ensure_garment_masks", "garment_lookup",
+           "colour_by_class", "GENERATING_STAGE", "VIEW_ORDER"]
 
 #: Generation order over the orientation classes. **This order is load-bearing** (thesis 4.4.2).
 #: A reference pass clears the key/value bank and refills it, so every frame that consumes a bank
@@ -267,6 +268,7 @@ def score_run(
     frames: Iterable[str] | None = None,
     masks_stage: str = "cloth_mask",
     verbose: bool = True,
+    garment_mask_for: Callable[[str], "object"] | None = None,
 ) -> dict:
     """Score a run written by :func:`run_orbit`, reading from disk.
 
@@ -276,6 +278,10 @@ def score_run(
 
     Returns consistency (Section 5.4), the detail statistic that must accompany it, and the width
     error for each of the three masks (Section 5.7).
+
+    `garment_mask_for` maps a frame to the garment region of its photograph (:func:`garment_lookup`).
+    Without it the detail statistic is normalised over the backdrop heuristic, and
+    ``result["garment_region"]`` records which of the two was used.
     """
     run = load_run(run_dir)
     path = run["path"]
@@ -305,11 +311,18 @@ def score_run(
         result["boundaries"] = _boundary_split(result["consistency"]["distances"], names, views)
 
     # The detail statistic: never report consistency without it (Section 5.2.3).
+    result["garment_region"] = None
     if garment_for is not None:
+        # Which part of the photograph normalises the ratio. Recorded because the two regions differ
+        # in kind on an on-model or non-white photograph (vton2d.metrics.garment_region).
+        result["garment_region"] = ("stored garment region" if garment_mask_for is not None
+                                    else "backdrop heuristic")
         ratios = []
         for n in names:
             try:
-                ratios.append(M.detail_statistic(path("final", n), path(masks_stage, n), garment_for(n)))
+                ratios.append(M.detail_statistic(
+                    path("final", n), path(masks_stage, n), garment_for(n),
+                    garment_mask_for(n) if garment_mask_for is not None else None))
             except ValueError:
                 pass
         if ratios:
@@ -408,7 +421,8 @@ def _boundary_split(distances, names: Sequence[str], view_of: dict[str, str]) ->
     }
 
 
-def report_run(run_dir: str | os.PathLike, garment_for=None, save: bool = True) -> dict:
+def report_run(run_dir: str | os.PathLike, garment_for=None, save: bool = True,
+               garment_mask_for=None) -> dict:
     """Print every statistic a run supports, in one block, and return them.
 
     Reads only the run directory, so it works in a fresh session with no model loaded. By default
@@ -420,7 +434,8 @@ def report_run(run_dir: str | os.PathLike, garment_for=None, save: bool = True) 
     run = load_run(run_dir)
     cfg = run["config"]
     man = run["manifest"]
-    res = score_run(run_dir, garment_for=garment_for, verbose=False)
+    res = score_run(run_dir, garment_for=garment_for, verbose=False,
+                    garment_mask_for=garment_mask_for)
     W = 64
 
     def rule(title=""):
@@ -482,6 +497,7 @@ def report_run(run_dir: str | os.PathLike, garment_for=None, save: bool = True) 
     if res.get("detail"):
         d = res["detail"]
         print(f" mean {d['mean']:.3f}    min {d['min']:.3f}    over {d['n_frames']} frames")
+        print(f" normalised over the {res['garment_region']} of the photograph")
         print(" -> " + ("well clear of the degenerate case; the consistency figure is usable"
                         if d["mean"] > 0.6 else
                         "LOW: check whether the garment is being erased rather than stabilised"))
@@ -518,6 +534,7 @@ def compare_runs(
     mask_stage: str = "cloth_mask",
     lpips: bool = False,
     verbose: bool = True,
+    garment_mask_for=None,
 ) -> list[dict]:
     """Tabulate several runs side by side: one row per run, one column per statistic.
 
@@ -525,9 +542,9 @@ def compare_runs(
 
     `baseline` is a run every other run is compared against, which is what makes a sweep readable:
 
-    * **mask IoU** against the baseline's cloth-specific mask answers the $T_1$ question, because
-      the only property of the coarse pass used downstream is the *shape* it produces
-      (Section 4.3.2). Scoring $T_1$ on the final image instead would confound it with $T_2$.
+    * **mask IoU** against the baseline's cloth-specific mask isolates the shape half of the $T_1$
+      question (Section 4.3.2). The budget also moves garment detail, which the detail column
+      reports; scoring $T_1$ on the final image alone would confound it with $T_2$.
     * **LPIPS / SSIM** against the baseline's final frame answers the $T_2$ question, since the
       refined pass output is the delivered artefact (Section 4.3.5). Off by default: it needs the
       optional `lpips` package and is much slower than the rest.
@@ -563,7 +580,8 @@ def compare_runs(
         cfg = run["config"]
         try:
             res = score_run(run_dir, garment_for=garment_for, verbose=False,
-                            frames=sorted(shared_set) if shared_set else None)
+                            frames=sorted(shared_set) if shared_set else None,
+                            garment_mask_for=garment_mask_for)
         except (ValueError, FileNotFoundError) as exc:
             rows.append({"run_id": cfg.get("run_id"), "error": str(exc)[:60]})
             continue
@@ -584,9 +602,9 @@ def compare_runs(
             fids = []
             for n in fid_frames:
                 try:
-                    fids.append(M.garment_fidelity(run["path"]("final", n),
-                                                   run["path"](mask_stage, n),
-                                                   garment_for(n)))
+                    fids.append(M.garment_fidelity(
+                        run["path"]("final", n), run["path"](mask_stage, n), garment_for(n),
+                        garment_mask_for(n) if garment_mask_for is not None else None))
                 except (ValueError, FileNotFoundError):
                     pass
             if fids:
@@ -767,6 +785,151 @@ def body_distortion(
                   f"   over {result['n_frames']} frames")
         else:
             print(f"{Path(run_dir).name}: no comparable frames — run parse_finals first")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# garment photographs and colour
+# ---------------------------------------------------------------------------
+
+def ensure_garment_masks(
+    run_dir: str | os.PathLike,
+    parse_fn: Callable[["object"], "object"] | None,
+    views: Sequence[str] = ("front", "side", "back"),
+    force: bool = False,
+    verbose: bool = True,
+) -> dict[str, str]:
+    """Store the garment region of each conditioning photograph a run was generated from.
+
+    :func:`run_orbit` saves the photographs to ``garment/<view>.png``; this adds
+    ``garment/<view>_mask.png`` beside each, so colour measures against the photograph can be
+    scored from the run directory over a region that means the same thing on every garment
+    (:func:`vton2d.metrics.garment_region`). A parsing pass with no diffusion, so it is cheap to
+    apply to runs that already exist.
+
+    `parse_fn` takes the PIL photograph and returns its upper-clothes parse, or ``None``; with the
+    notebook's automasker, ``lambda img: extract_upper_clothes_mask(automasker(img))``. Returns
+    ``{view: source}`` with source ``"parsed"``, ``"backdrop heuristic"``, or ``"present"`` for a
+    region already on disk.
+    """
+    from PIL import Image
+
+    root = Path(run_dir) / "garment"
+    out: dict[str, str] = {}
+    for view in views:
+        photo_path, mask_path = root / f"{view}.png", root / f"{view}_mask.png"
+        if not photo_path.exists():
+            continue
+        if mask_path.exists() and not force:
+            out[view] = "present"
+            continue
+        photo = Image.open(photo_path).convert("RGB")
+        parse = parse_fn(photo) if parse_fn is not None else None
+        mask, source = M.garment_region(photo, parse, return_source=True)
+        Image.fromarray(mask).save(mask_path)
+        out[view] = source
+        if verbose:
+            print(f"  {Path(run_dir).name}/garment/{view}_mask.png   {source}, "
+                  f"{float((mask > 0).mean()):.0%} of the photograph")
+    if not out:
+        raise FileNotFoundError(f"no garment photographs in {root}; was this run written by run_orbit?")
+    return out
+
+
+def garment_lookup(run_dir: str | os.PathLike, require_masks: bool = False):
+    """``(garment_for, garment_mask_for)`` read from a run directory, for the scoring functions.
+
+    Both map a frame name to a file for that frame's orientation class: the photograph it was
+    conditioned on (``eq:garment-selection``) and the garment region stored by
+    :func:`ensure_garment_masks`. Reading them from the run rather than from notebook variables
+    means a frame cannot be scored against a different garment from the one that generated it.
+
+    With ``require_masks`` a missing region raises instead of letting the scorers fall back to the
+    backdrop heuristic, which is the right setting for any comparison across garments.
+    """
+    run = load_run(run_dir)
+    root = Path(run_dir) / "garment"
+    views = run["manifest"].get("extra", {}).get("view_of") or infer_view_of(run_dir)
+    classes = set(views.values()) - {"unknown"}
+    if not classes:
+        raise ValueError(f"no orientation classes for {run_dir}; run backfill_view_of first")
+    photos = {v: root / f"{v}.png" for v in classes if (root / f"{v}.png").exists()}
+    masks = {v: root / f"{v}_mask.png" for v in photos if (root / f"{v}_mask.png").exists()}
+    if classes - set(photos):
+        raise FileNotFoundError(f"{run_dir}: no conditioning photograph for {sorted(classes - set(photos))}")
+    if require_masks and set(masks) != set(photos):
+        raise FileNotFoundError(f"{run_dir}: no garment region for {sorted(set(photos) - set(masks))}; "
+                                f"run ensure_garment_masks first")
+
+    def view(frame):
+        v = views.get(Path(frame).stem)
+        if v not in photos:
+            raise ValueError(f"frame {frame!r} has no usable orientation class in {run_dir}")
+        return v
+
+    return (lambda frame: photos[view(frame)]), (lambda frame: masks.get(view(frame)))
+
+
+def colour_by_class(
+    run_dir: str | os.PathLike,
+    frames: Iterable[str] | None = None,
+    mask_stage: str = "cloth_mask",
+    verbose: bool = True,
+) -> dict:
+    """Colour against the conditioning photograph, per orientation class (thesis §6.2).
+
+    For every frame, :func:`vton2d.metrics.colour_shift` and :func:`vton2d.metrics.garment_fidelity`
+    against the photograph of that frame's class, both over the stored garment region, which must
+    exist (:func:`ensure_garment_masks`). Aggregated per class as medians.
+
+    Read within a garment, between classes. Capture lighting differs from catalogue lighting, so no
+    class sits at zero, and a light garment has no headroom to lighten; what places a failure on the
+    dorsal views is the dorsal class departing from the frontal class of the *same* garment, which
+    ``dorsal_minus_frontal`` reports.
+    """
+    import numpy as np
+
+    run = load_run(run_dir)
+    path = run["path"]
+    garment_for, mask_for = garment_lookup(run_dir, require_masks=True)
+    views = run["manifest"].get("extra", {}).get("view_of") or infer_view_of(run_dir)
+    names = sorted(frames if frames is not None else run["frames"])
+
+    rows = []
+    for n in names:
+        final, mask = path("final", n), path(mask_stage, n)
+        if not (Path(final).exists() and Path(mask).exists()):
+            continue
+        try:
+            shift = M.colour_shift(final, mask, garment_for(n), mask_for(n))
+            fid = M.garment_fidelity(final, mask, garment_for(n), mask_for(n))
+        except ValueError:
+            continue
+        rows.append({"frame": Path(n).stem, "view": views.get(Path(n).stem), "fidelity": fid, **shift})
+
+    keys = ("d_value", "d_saturation", "fidelity", "value", "ref_value", "saturation", "ref_saturation")
+    by_class = {}
+    for cls in ("front", "side", "back"):
+        sel = [r for r in rows if r["view"] == cls]
+        if sel:
+            by_class[cls] = {"n": len(sel), **{k: float(np.median([r[k] for r in sel])) for k in keys}}
+    penalty = None
+    if "front" in by_class and "back" in by_class:
+        penalty = {k: by_class["back"][k] - by_class["front"][k]
+                   for k in ("d_value", "d_saturation", "fidelity")}
+
+    result = {"run_dir": Path(run_dir), "garment": run["config"].get("garment"), "frames": rows,
+              "by_class": by_class, "dorsal_minus_frontal": penalty}
+    if verbose:
+        print(f"{Path(run_dir).name}   ({len(rows)} frames, garment {result['garment']})")
+        print(f"  {'class':<7}{'n':>4}{'dV':>8}{'dS':>8}{'fidelity':>10}   V frame/photo   S frame/photo")
+        for cls, c in by_class.items():
+            print(f"  {cls:<7}{c['n']:>4}{c['d_value']:>+8.1f}{c['d_saturation']:>+8.1f}"
+                  f"{c['fidelity']:>10.3f}   {c['value']:5.0f} / {c['ref_value']:<5.0f}"
+                  f"  {c['saturation']:5.0f} / {c['ref_saturation']:<5.0f}")
+        if penalty:
+            print(f"  {'back-front':<11}{penalty['d_value']:>+8.1f}{penalty['d_saturation']:>+8.1f}"
+                  f"{penalty['fidelity']:>+10.3f}")
     return result
 
 

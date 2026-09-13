@@ -38,6 +38,9 @@ __all__ = [
     "view_from_densepose",
     "mask_iou",
     "garment_fidelity",
+    "foreground_fraction",
+    "garment_region",
+    "colour_shift",
     "body_width_shift",
     "aggregate_body_shift",
     "pairwise_lpips_ssim",
@@ -358,12 +361,84 @@ def garment_fidelity(image, mask, garment_image, garment_mask=None, bins=HSV_BIN
     ))
 
 
+def foreground_fraction(image, white_threshold: int = 245) -> float:
+    """Share of a catalogue photograph that the near-white backdrop heuristic keeps as garment.
+
+    The heuristic behind the ``garment_mask`` default of :func:`detail_statistic` and
+    :func:`garment_fidelity` assumes a white sweep. On a grey studio wall, an indoor room or a
+    concrete backdrop it keeps close to the whole frame, and a region that is the whole photograph
+    no longer excludes the backdrop that ``eq:fidelity`` says it excludes. A value near 1.0 is the
+    signal to pass a parsed garment region instead (:func:`garment_region`).
+    """
+    grey = cv2.cvtColor(as_bgr(image), cv2.COLOR_BGR2GRAY)
+    return float((grey < white_threshold).mean())
+
+
+def garment_region(garment_image, parse_mask=None, min_fraction: float = 0.02,
+                   return_source: bool = False):
+    """The garment's pixels in its catalogue photograph, as an ``HxW`` mask in {0, 255}.
+
+    Prefers `parse_mask`, the upper-clothes parse of the photograph, which excludes the model's
+    skin, hair and trousers as well as the backdrop. Falls back to the near-white backdrop
+    heuristic when no parse is given or the parser found almost nothing, which is what happens on
+    a flat-lay packshot with no person in it — the case the heuristic was built for.
+
+    The choice matters as soon as garments are compared with each other. The heuristic keeps skin
+    and trousers on an on-model photograph and keeps everything on a non-white backdrop, so the
+    region it yields differs in kind from garment to garment, and a colour measure compared across
+    garments would compare those differences rather than the rendering.
+
+    With ``return_source`` returns ``(mask, "parsed" | "backdrop heuristic")``.
+    """
+    if parse_mask is not None:
+        shape = as_bgr(garment_image).shape[:2]
+        m = _resize_mask_to(as_mask(parse_mask), shape)
+        if (m > 0).mean() >= min_fraction:
+            return (m, "parsed") if return_source else m
+    m = _garment_foreground(garment_image)
+    return (m, "backdrop heuristic") if return_source else m
+
+
+def colour_shift(image, mask, garment_image, garment_mask) -> dict:
+    """How far the rendered garment's value and saturation sit from its photograph's.
+
+    The direct reading of the washout of §6.2: a garment rendered lighter and less saturated than
+    the one requested. Medians of the HSV value and saturation channels (OpenCV's 0-255 scale)
+    inside the frame's garment mask and inside the photograph's garment region; ``d_value`` and
+    ``d_saturation`` are frame minus photograph, so washout shows as ``d_value > 0`` together with
+    ``d_saturation < 0``.
+
+    It complements :func:`garment_fidelity` rather than replacing it. Fidelity is a histogram
+    distance, which saturates once a flat colour crosses a bin boundary and does not say which way
+    the colour moved; these two numbers keep the direction and are not quantised. Hue is left out,
+    being undefined for the near-black and near-grey pixels a dark garment consists of. Capture
+    lighting differs from catalogue lighting, so neither number sits at zero for a good result:
+    they are read between orientation classes of the same garment.
+
+    `garment_mask` has no default. The backdrop heuristic is wrong for most on-model photographs
+    (:func:`garment_region`), and a colour statistic over skin, trousers and wall would describe
+    those instead of the garment.
+    """
+    def medians(img, msk):
+        bgr = as_bgr(img)
+        m = _resize_mask_to(as_mask(msk), bgr.shape[:2]) > 0
+        if not m.any():
+            raise ValueError("empty mask: no pixels to take a median over")
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        return float(np.median(hsv[..., 2][m])), float(np.median(hsv[..., 1][m]))
+
+    v, s = medians(image, mask)
+    v_ref, s_ref = medians(garment_image, garment_mask)
+    return {"value": v, "saturation": s, "ref_value": v_ref, "ref_saturation": s_ref,
+            "d_value": v - v_ref, "d_saturation": s - s_ref}
+
+
 def mask_iou(mask_a, mask_b) -> float:
     """Intersection over union of two masks.
 
-    The instrument for the $T_1$ sweep of Section 4.3.2: the only property of the coarse pass used
-    downstream is the *shape* of the generated garment, so the question "is a cheaper coarse pass
-    good enough" is answered on the cloth-specific mask it yields, not on the final image.
+    The instrument for the $T_1$ sweep of Section 4.3.2. The cloth-specific mask is what the coarse
+    pass hands to the refinement, so its agreement across budgets isolates the shape half of that
+    trade-off; the grid showed the budget also moves garment detail, which this cannot see.
     """
     a = as_mask(mask_a) > 0
     b = _resize_mask_to(as_mask(mask_b), a.shape[:2]) > 0
