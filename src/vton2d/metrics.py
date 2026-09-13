@@ -448,6 +448,7 @@ def colour_shift(image, mask, garment_image, garment_mask) -> dict:
 
 LIP_UPPER_CLOTHES = 5   # SCHP, LIP label set
 ATR_UPPER_CLOTHES = 4   # SCHP, ATR label set
+LIP_HEAD = (1, 2, 13)   # SCHP, LIP: hat, hair, face
 
 
 def _label_map(labels, shape: tuple[int, int]) -> np.ndarray:
@@ -459,14 +460,16 @@ def _label_map(labels, shape: tuple[int, int]) -> np.ndarray:
 
 
 def catalogue_garment_region(photo, densepose, schp_lip, schp_atr, min_fraction: float = 0.02,
-                             min_person: float = 0.01) -> tuple[np.ndarray, str]:
+                             min_person: float = 0.01, min_head: float = 0.005) -> tuple[np.ndarray, str]:
     """The garment region of a catalogue photograph, from the parses the automasker produces anyway.
 
     Decided in order:
 
-    * **No person** (DensePose covers under ``min_person`` of the frame): a flat-lay packshot. The
-      human parsers are outside their domain there and label part of the garment at best, while
-      the near-white backdrop heuristic is exactly right on a packshot's white sweep.
+    * **No person**: DensePose covers under ``min_person`` of the frame, or the LIP parser finds a
+      hat, hair or face over under ``min_head`` of it. A flat-lay packshot. DensePose alone does not
+      decide it, because it has found a body in a flat-lay tee, whose outline is a torso's. The human
+      parsers are outside their domain on a packshot and label part of the garment at best, while
+      the near-white backdrop heuristic is exactly right on its white sweep.
     * **Both parsers agree** on upper-clothes over at least ``min_fraction`` of the frame: their
       intersection. Taking the larger of the two instead systematically picks whichever parser
       over-segments, and on an on-model photograph that means bare arms labelled as sleeve, which
@@ -476,9 +479,12 @@ def catalogue_garment_region(photo, densepose, schp_lip, schp_atr, min_fraction:
     Returns ``(mask, source)``, the mask in {0, 255} at the photograph's resolution.
     """
     shape = as_bgr(photo).shape[:2]
-    if (_label_map(densepose, shape) > 0).mean() < min_person:
+    lip_labels = _label_map(schp_lip, shape)
+    body = (_label_map(densepose, shape) > 0).mean()
+    head = np.isin(lip_labels, LIP_HEAD).mean()
+    if body < min_person or head < min_head:
         return _garment_foreground(photo), "no person: backdrop heuristic"
-    lip = _label_map(schp_lip, shape) == LIP_UPPER_CLOTHES
+    lip = lip_labels == LIP_UPPER_CLOTHES
     atr = _label_map(schp_atr, shape) == ATR_UPPER_CLOTHES
     both = lip & atr
     if both.mean() >= min_fraction:

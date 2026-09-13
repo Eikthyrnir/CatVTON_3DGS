@@ -23,7 +23,8 @@ _CONFIG_DEFAULTS = {f.name: f.default for f in fields(RunConfig) if f.default is
 __all__ = ["run_orbit", "ensure_orbit", "score_run", "report_run", "compare_runs",
            "infer_view_of", "backfill_view_of", "count_decoder_attn1", "generating_stage",
            "parse_finals", "body_distortion", "ensure_garment_masks", "garment_lookup",
-           "colour_by_class", "outside_change_by_class", "GENERATING_STAGE", "VIEW_ORDER"]
+           "colour_by_class", "outside_change_by_class", "GarmentMismatchError",
+           "GENERATING_STAGE", "VIEW_ORDER"]
 
 #: Generation order over the orientation classes. **This order is load-bearing** (thesis 4.4.2).
 #: A reference pass clears the key/value bank and refills it, so every frame that consumes a bank
@@ -37,6 +38,46 @@ def _load_person(path, resolution):
     from PIL import Image  # local: keeps the module importable without PIL at import time
 
     return Image.open(path).convert("RGB").resize(tuple(resolution))
+
+
+class GarmentMismatchError(RuntimeError):
+    """A scorer was handed a garment photograph other than the one a run was conditioned on."""
+
+
+def _check_garment_for(run_dir, garment_for, names: Sequence[str], views: dict[str, str],
+                       tolerance: float = 2.0) -> None:
+    """Refuse to score a run against a photograph it was not conditioned on.
+
+    A ``garment_for`` written in the notebook closes over notebook variables, and those hold whichever
+    garment's setup cell ran last. A detail ratio or fidelity computed against another garment's
+    photograph is a plausible-looking number that is simply wrong, and nothing downstream can tell.
+    Each class's supplied photograph is compared with ``garment/<view>.png``, which :func:`run_orbit`
+    wrote from the photograph it actually used; runs written before garments were stored are not
+    checked. Raises rather than returning a row error, so a table is never printed without the run.
+    """
+    import numpy as np
+    from PIL import Image
+
+    root = Path(run_dir) / "garment"
+    checked: set[str] = set()
+    for n in names:
+        view = views.get(Path(n).stem)
+        if view is None or view in checked:
+            continue
+        checked.add(view)
+        stored = root / f"{view}.png"
+        if not stored.exists():
+            continue
+        supplied = M._open(garment_for(n)).convert("RGB")
+        reference = Image.open(stored).convert("RGB")
+        if supplied.size != reference.size:
+            supplied = supplied.resize(reference.size)
+        diff = float(np.abs(np.asarray(supplied, np.float32) - np.asarray(reference, np.float32)).mean())
+        if diff > tolerance:
+            raise GarmentMismatchError(
+                f"{Path(run_dir).name}: the {view} photograph from garment_for is not the one this run "
+                f"was conditioned on (mean difference {diff:.1f} on 0-255). Score against the run's own "
+                f"photographs with garment_lookup(run_dir).")
 
 
 def run_orbit(
@@ -318,6 +359,7 @@ def score_run(
     # The detail statistic: never report consistency without it (Section 5.2.3).
     result["garment_region"] = None
     if garment_for is not None:
+        _check_garment_for(run_dir, garment_for, names, views or {})
         # Which part of the photograph normalises the ratio. Recorded because the two regions differ
         # in kind on an on-model or non-white photograph (vton2d.metrics.garment_region).
         result["garment_region"] = ("stored garment region" if garment_mask_for is not None
@@ -928,6 +970,11 @@ def colour_by_class(
         sel = [r for r in rows if r["view"] == cls]
         if sel:
             by_class[cls] = {"n": len(sel), **{k: float(np.median([r[k] for r in sel])) for k in keys}}
+            # Washout can switch on for whole frames rather than shift every frame a little, and a
+            # class median hides that: count the frames where most of the garment left the range of
+            # the photograph's colours.
+            by_class[cls]["n_mostly_lighter"] = int(sum(r["lighter_share"] >= 0.5 for r in sel))
+            by_class[cls]["lighter_max"] = float(max(r["lighter_share"] for r in sel))
     penalty = None
     if "front" in by_class and "back" in by_class:
         penalty = {k: by_class["back"][k] - by_class["front"][k]
@@ -938,10 +985,11 @@ def colour_by_class(
     if verbose:
         print(f"{Path(run_dir).name}   ({stage}, {len(rows)} frames, garment {result['garment']})")
         print(f"  {'class':<7}{'n':>4}{'dV':>8}{'dS':>8}{'fidelity':>10}{'lighter':>9}{'greyer':>8}"
-              f"   V frame/photo   S frame/photo")
+              f"{'mostly lighter':>17}   V frame/photo   S frame/photo")
         for cls, c in by_class.items():
             print(f"  {cls:<7}{c['n']:>4}{c['d_value']:>+8.1f}{c['d_saturation']:>+8.1f}"
                   f"{c['fidelity']:>10.3f}{c['lighter_share']:>9.1%}{c['greyer_share']:>8.1%}"
+                  f"{c['n_mostly_lighter']:>6} (max {c['lighter_max']:>4.0%})"
                   f"   {c['value']:5.0f} / {c['ref_value']:<5.0f}"
                   f"  {c['saturation']:5.0f} / {c['ref_saturation']:<5.0f}")
         if penalty:
@@ -950,6 +998,8 @@ def colour_by_class(
                   f"{penalty['greyer_share']:>+8.1%}")
         print("  lighter / greyer: share of garment pixels lighter than the photograph's lightest 5 %,"
               " greyer than its greyest 5 %")
+        print("  mostly lighter: frames in which over half the garment is lighter than that, and the"
+              " largest share in any frame")
     return result
 
 
