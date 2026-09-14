@@ -278,6 +278,12 @@ assert same["lighter_share"] == 0.0 and same["greyer_share"] == 0.0, same
 patch = photo.copy(); patch[30:50, 25:70] = (200, 205, 215)
 ps = colour_shift(patch, parse, photo, parse)
 assert ps["d_value"] == 0 and 0.30 < ps["lighter_share"] < 0.37, ps
+# A near-black garment has no saturation to measure; its value still reads, and a grey render is washed.
+black = np.full((H, W, 3), 200, np.uint8); black[30:90, 25:70] = (22, 20, 26)
+grey = black.copy(); grey[30:90, 25:70] = (150, 150, 152)
+bs = colour_shift(grey, parse, black, parse)
+assert bs["d_value"] > 64 and bs["lighter_share"] == 1.0, bs
+assert all(bs[k] != bs[k] for k in ("saturation", "ref_saturation", "d_saturation", "greyer_share")), bs
 try:
     colour_shift(photo, np.zeros((H, W), np.uint8), photo, parse)
     raise AssertionError("an empty frame mask was accepted")
@@ -299,6 +305,7 @@ gfor, mfor = garment_lookup(writer.root, require_masks=True)
 assert Path(gfor("front_000")).name == "front.png" and Path(mfor("back_001")).name == "back_mask.png"
 cb = colour_by_class(writer.root)
 assert set(cb["by_class"]) == {"front", "side", "back"}, cb["by_class"].keys()
+assert all(isinstance(c["n_washed"], int) for c in cb["by_class"].values()), cb["by_class"]
 assert cb["dorsal_minus_frontal"] is not None
 masked = score_run(writer.root, garment_for=gfor, garment_mask_for=mfor, verbose=False)
 assert masked["garment_region"] == "stored garment region", masked["garment_region"]

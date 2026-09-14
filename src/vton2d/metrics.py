@@ -401,7 +401,7 @@ def garment_region(garment_image, parse_mask=None, min_fraction: float = 0.02,
     return (m, "backdrop heuristic") if return_source else m
 
 
-def colour_shift(image, mask, garment_image, garment_mask) -> dict:
+def colour_shift(image, mask, garment_image, garment_mask, min_ref_value: float = 64.0) -> dict:
     """How far the rendered garment's value and saturation sit from its photograph's.
 
     The direct reading of the washout of §6.2: a garment rendered lighter and less saturated than
@@ -413,7 +413,9 @@ def colour_shift(image, mask, garment_image, garment_mask) -> dict:
     It complements :func:`garment_fidelity` rather than replacing it. Fidelity is a histogram
     distance, which saturates once a flat colour crosses a bin boundary and does not say which way
     the colour moved; these two numbers keep the direction and are not quantised. Hue is left out,
-    being undefined for the near-black and near-grey pixels a dark garment consists of. Capture
+    being undefined for the near-black and near-grey pixels a dark garment consists of. Saturation
+    is subject to the same noise on a near-black garment, so when the photograph's garment median
+    value is below ``min_ref_value`` (a quarter of the scale) the saturation fields are NaN. Capture
     lighting differs from catalogue lighting, so neither number sits at zero for a good result:
     they are read between orientation classes of the same garment.
 
@@ -443,6 +445,12 @@ def colour_shift(image, mask, garment_image, garment_mask) -> dict:
     out["d_saturation"] = out["saturation"] - out["ref_saturation"]
     out["lighter_share"] = float((v > np.percentile(v_ref, 95)).mean())
     out["greyer_share"] = float((s < np.percentile(s_ref, 5)).mean())
+    if out["ref_value"] < min_ref_value:
+        # Saturation is (max - min) / max, so as max falls towards black a few levels of sensor and
+        # compression noise become tens of saturation units. A near-black garment has no saturation
+        # to measure, and its photograph's reads as noise or as the colour cast of the shot.
+        for key in ("saturation", "ref_saturation", "d_saturation", "greyer_share"):
+            out[key] = float("nan")
     return out
 
 

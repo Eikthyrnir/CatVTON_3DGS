@@ -928,8 +928,13 @@ def colour_by_class(
     mask_stage: str = "cloth_mask",
     verbose: bool = True,
     stage: str = "final",
+    washed_margin: float = 64.0,
 ) -> dict:
     """Colour against the conditioning photograph, per orientation class (thesis §6.2).
+
+    ``n_washed`` counts the frames whose garment median value exceeds the photograph's by more than
+    ``washed_margin``. Unlike the shares it does not depend on the spread of the photograph's colours,
+    which for a plain black garment is narrow enough that a rendering still close to black exceeds it.
 
     ``stage="coarse"`` scores the Phase-1 output over the same region instead of the delivered frame,
     which is what §6.2's statement about the refinement pass on dorsal frames needs.
@@ -975,6 +980,7 @@ def colour_by_class(
             # the photograph's colours.
             by_class[cls]["n_mostly_lighter"] = int(sum(r["lighter_share"] >= 0.5 for r in sel))
             by_class[cls]["lighter_max"] = float(max(r["lighter_share"] for r in sel))
+            by_class[cls]["n_washed"] = int(sum(r["d_value"] > washed_margin for r in sel))
     penalty = None
     if "front" in by_class and "back" in by_class:
         penalty = {k: by_class["back"][k] - by_class["front"][k]
@@ -985,11 +991,11 @@ def colour_by_class(
     if verbose:
         print(f"{Path(run_dir).name}   ({stage}, {len(rows)} frames, garment {result['garment']})")
         print(f"  {'class':<7}{'n':>4}{'dV':>8}{'dS':>8}{'fidelity':>10}{'lighter':>9}{'greyer':>8}"
-              f"{'mostly lighter':>17}   V frame/photo   S frame/photo")
+              f"{'mostly lighter':>17}{'washed':>8}   V frame/photo   S frame/photo")
         for cls, c in by_class.items():
             print(f"  {cls:<7}{c['n']:>4}{c['d_value']:>+8.1f}{c['d_saturation']:>+8.1f}"
                   f"{c['fidelity']:>10.3f}{c['lighter_share']:>9.1%}{c['greyer_share']:>8.1%}"
-                  f"{c['n_mostly_lighter']:>6} (max {c['lighter_max']:>4.0%})"
+                  f"{c['n_mostly_lighter']:>6} (max {c['lighter_max']:>4.0%}){c['n_washed']:>8}"
                   f"   {c['value']:5.0f} / {c['ref_value']:<5.0f}"
                   f"  {c['saturation']:5.0f} / {c['ref_saturation']:<5.0f}")
         if penalty:
@@ -1000,6 +1006,8 @@ def colour_by_class(
               " greyer than its greyest 5 %")
         print("  mostly lighter: frames in which over half the garment is lighter than that, and the"
               " largest share in any frame")
+        print(f"  washed: frames whose garment median value exceeds the photograph's by more than"
+              f" {washed_margin:.0f}; saturation is nan where the photograph's garment is near-black")
     return result
 
 
