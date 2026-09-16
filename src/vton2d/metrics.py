@@ -43,6 +43,7 @@ __all__ = [
     "catalogue_garment_region",
     "colour_shift",
     "outside_mask_change",
+    "boundary_seam",
     "body_width_shift",
     "aggregate_body_shift",
     "pairwise_lpips_ssim",
@@ -537,6 +538,27 @@ def outside_mask_change(image, reference, mask, margin: int = 15) -> dict:
     s_b = cv2.cvtColor(b_bgr, cv2.COLOR_BGR2HSV)[..., 1][outside]
     return {"abs_diff": float(diff), "grain_ratio": float(grain),
             "d_saturation": float(np.median(s_a)) - float(np.median(s_b))}
+
+
+def boundary_seam(image, reference, mask, width: int = 4) -> float:
+    """Edge energy along the boundary of `mask` in `image`, relative to the same band in `reference`.
+
+    Pasting a generated region over a photograph leaves a seam where the two meet whenever their
+    colour or texture differ at the edge, feathered alpha or not. The band of ``width`` pixels on
+    either side of the mask's boundary is where that seam lives. Returns the mean gradient magnitude
+    of `image` over the band divided by that of `reference` over the same band, so 1.0 means the
+    boundary carries no more edge than in the reference frame (thesis §4.3.7).
+    """
+    m = as_mask(mask)
+    k = np.ones((2 * width + 1, 2 * width + 1), np.uint8)
+    band = (cv2.dilate(m, k) > 0) & ~(cv2.erode(m, k) > 0)
+    if not band.any():
+        raise ValueError("mask has no boundary to measure a seam along")
+    region = band.astype(np.uint8) * 255
+    g_ref = gradient_magnitude_mean(reference, region)
+    if g_ref <= 1e-6:
+        raise ValueError("reference has no gradient along the boundary to normalise by")
+    return gradient_magnitude_mean(image, region) / g_ref
 
 
 def mask_iou(mask_a, mask_b) -> float:

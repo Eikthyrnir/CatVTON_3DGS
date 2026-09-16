@@ -24,6 +24,7 @@ __all__ = ["run_orbit", "ensure_orbit", "score_run", "report_run", "compare_runs
            "infer_view_of", "backfill_view_of", "count_decoder_attn1", "generating_stage",
            "parse_finals", "body_distortion", "ensure_garment_masks", "garment_lookup",
            "colour_by_class", "outside_change_by_class", "GarmentMismatchError",
+           "recompose_run", "recomposition_report", "orbit_summary",
            "GENERATING_STAGE", "VIEW_ORDER"]
 
 #: Generation order over the orientation classes. **This order is load-bearing** (thesis 4.4.2).
@@ -769,8 +770,12 @@ def parse_finals(
     stage: str = "final_densepose",
     skip_existing: bool = True,
     verbose: bool = True,
+    source: str = "final",
 ) -> int:
     """Run a parser over a run's delivered frames and store the result as a new stage.
+
+    `source` names the stage whose images are parsed; the default is the delivered frame, and
+    ``source="recomposed"`` parses the frames written by :func:`recompose_run`.
 
     The runs hold DensePose for every *input* frame but not for the frames the pipeline produced,
     so nothing on disk can answer a question about the rendered body. This adds that side. It is a
@@ -785,7 +790,7 @@ def parse_finals(
     root = Path(run_dir)
     out = root / stage
     out.mkdir(parents=True, exist_ok=True)
-    finals = sorted((root / "final").glob("*.png"))
+    finals = sorted((root / source).glob("*.png"))
     n = 0
     for path in finals:
         target = out / path.name
@@ -1058,6 +1063,160 @@ def outside_change_by_class(
                   f"{c['d_saturation']:>+8.1f}")
         print("  grain: output over input gradient energy, 1.0 = unchanged; |diff| on 0-255")
     return result
+
+
+# ---------------------------------------------------------------------------
+# composition after refinement (thesis §4.3.7)
+# ---------------------------------------------------------------------------
+
+def recompose_run(
+    run_dir: str | os.PathLike,
+    paste_fn: Callable[["object", "object", "object"], "object"],
+    capture_for: Callable[[str], "object"] | None = None,
+    stage: str = "recomposed",
+    mask_stage: str = "comp_mask",
+    skip_existing: bool = True,
+    verbose: bool = True,
+) -> int:
+    """Paste every delivered frame back over its capture outside the composition mask.
+
+    The delivered frame is the decoded output of the refinement pass, so outside the mask it carries
+    the autoencoder round trip and whatever the pass did to the body there. Applying the composition a
+    second time, after refinement, restores the captured pixels outside the mask at the price of a
+    seam along its edge. `paste_fn(capture, tryon, mask)` should be the notebook's ``paste_back`` so the
+    second composition is the pipeline's own. `capture_for(frame)` returns the captured frame at the
+    working resolution; without it the ``composite`` stage stands in, which outside the mask already
+    holds the capture. Writes ``<stage>/<frame>.png``.
+    """
+    from PIL import Image
+
+    root = Path(run_dir)
+    run = load_run(run_dir)
+    out = root / stage
+    out.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for frame in run["frames"]:
+        target = out / f"{frame}.png"
+        final, mask = run["path"]("final", frame), run["path"](mask_stage, frame)
+        if (skip_existing and target.exists()) or not (Path(final).exists() and Path(mask).exists()):
+            continue
+        capture = (capture_for(frame) if capture_for is not None
+                   else Image.open(run["path"]("composite", frame)).convert("RGB"))
+        paste_fn(capture, Image.open(final).convert("RGB"), Image.open(mask).convert("L")).save(target)
+        n += 1
+    if verbose:
+        print(f"{root.name}: recomposed {n} frame(s) into {stage}/")
+    return n
+
+
+def recomposition_report(
+    run_dir: str | os.PathLike,
+    frames: Iterable[str] | None = None,
+    width: int = 4,
+    verbose: bool = True,
+) -> dict:
+    """What composing after refinement costs and what it buys, per orientation class (thesis §4.3.7).
+
+    *Seam*: :func:`vton2d.metrics.boundary_seam` over a band of `width` px either side of the edge of
+    the composition mask, against the delivered frame, for the recomposed frame and for the composite
+    (whose paste the refinement pass is there to smooth over). *Body*: the absolute torso-width shift
+    against the capture for the delivered and the recomposed frame. Needs :func:`recompose_run` and
+    ``parse_finals(..., source="recomposed", stage="recomposed_densepose")`` to have run, as well as
+    the ordinary ``parse_finals``.
+    """
+    import numpy as np
+
+    run = load_run(run_dir)
+    path = run["path"]
+    views = run["manifest"].get("extra", {}).get("view_of") or infer_view_of(run_dir)
+    names = sorted(frames if frames is not None else run["frames"])
+
+    rows = []
+    for n in names:
+        final, rec, comp, mask = (path(s, n) for s in ("final", "recomposed", "composite", "comp_mask"))
+        if not all(Path(p).exists() for p in (final, rec, comp, mask)):
+            continue
+        try:
+            row = {"frame": Path(n).stem, "view": views.get(Path(n).stem),
+                   "seam_composite": M.boundary_seam(comp, final, mask, width),
+                   "seam_recomposed": M.boundary_seam(rec, final, mask, width)}
+        except ValueError:
+            continue
+        for key, stage in (("body_final", "final_densepose"), ("body_recomposed", "recomposed_densepose")):
+            shift = (M.body_width_shift(path(stage, n), path("densepose", n))
+                     if Path(path(stage, n)).exists() and Path(path("densepose", n)).exists() else None)
+            row[key] = shift["abs_median_pct"] if shift else float("nan")
+        rows.append(row)
+
+    keys = ("seam_composite", "seam_recomposed", "body_final", "body_recomposed")
+
+    def med(values):
+        values = [v for v in values if v == v]
+        return float(np.median(values)) if values else float("nan")
+
+    by_class = {}
+    for cls in ("front", "side", "back"):
+        sel = [r for r in rows if r["view"] == cls]
+        if sel:
+            by_class[cls] = {"n": len(sel), **{k: med([r[k] for r in sel]) for k in keys}}
+    overall = {"n": len(rows), **{k: med([r[k] for r in rows]) for k in keys}}
+
+    result = {"run_dir": Path(run_dir), "width": width, "frames": rows, "by_class": by_class,
+              "overall": overall}
+    if verbose:
+        print(f"{Path(run_dir).name}   (seam band {width} px either side of the composition mask edge)")
+        print(f"  {'class':<8}{'n':>4}{'seam composite':>16}{'seam recomposed':>17}"
+              f"{'body delivered':>16}{'body recomposed':>17}")
+        for cls, c in list(by_class.items()) + [("all", overall)]:
+            print(f"  {cls:<8}{c['n']:>4}{c['seam_composite']:>16.3f}{c['seam_recomposed']:>17.3f}"
+                  f"{c['body_final']:>15.1f}%{c['body_recomposed']:>16.1f}%")
+        print("  seam: edge energy along the mask boundary relative to the delivered frame, 1.0 = none added;"
+              " body: absolute torso-width shift against the capture")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# full-orbit summaries (thesis tab:res-2d)
+# ---------------------------------------------------------------------------
+
+def orbit_summary(run_dir: str | os.PathLike, verbose: bool = True) -> dict:
+    """The full-orbit figures of thesis ``tab:res-2d`` for one run, from its directory alone.
+
+    Consistency over adjacent pairs, the detail statistic against the run's own garment photographs
+    over the backdrop cut (the form in which ``tab:res-2d`` reports it), and the median absolute
+    torso-width shift per orientation class, which needs :func:`parse_finals` to have run.
+    """
+    import numpy as np
+
+    run = load_run(run_dir)
+    path = run["path"]
+    garment_for, _ = garment_lookup(run_dir)
+    res = score_run(run_dir, garment_for=garment_for, verbose=False)
+    c, d = res["consistency"], res.get("detail") or {}
+    views = res.get("view_of") or {}
+
+    per_class: dict[str, list[float]] = {}
+    for n in res["frames"]:
+        gen, ref = path("final_densepose", n), path("densepose", n)
+        if not (Path(gen).exists() and Path(ref).exists()):
+            continue
+        shift = M.body_width_shift(gen, ref)
+        if shift and views.get(n):
+            per_class.setdefault(views[n], []).append(shift["abs_median_pct"])
+    body = {cls: {"median_pct": float(np.median(per_class[cls])), "n": len(per_class[cls])}
+            for cls in ("front", "side", "back") if cls in per_class}
+
+    out = {"run_dir": str(run_dir), "subject": run["config"].get("subject"), "n_frames": res["n_frames"],
+           "consistency_mean": c["mean"], "consistency_median": c["median"], "consistency_p90": c["p90"],
+           "consistency_max": c["max"], "detail_mean": d.get("mean"), "detail_min": d.get("min"),
+           "boundary_ratio": (res.get("boundaries") or {}).get("ratio"), "body": body}
+    if verbose:
+        body_txt = "   ".join(f"{cls} {b['median_pct']:.1f}% ({b['n']})" for cls, b in body.items())
+        detail_txt = (f"detail {d['mean']:.3f} min {d['min']:.3f}" if d else "detail -")
+        print(f"{Path(run_dir).name}: {res['n_frames']} frames | consistency mean {c['mean']:.3f} "
+              f"median {c['median']:.3f} p90 {c['p90']:.3f} worst {c['max']:.3f} | {detail_txt} | "
+              f"body {body_txt or '- (run parse_finals)'}")
+    return out
 
 
 def count_decoder_attn1(unet, verbose: bool = True) -> dict:

@@ -407,4 +407,35 @@ assert set(oc["by_class"]) == {"front", "side", "back"}, oc["by_class"]
 assert all(abs(c["grain_ratio"] - 1) < 1e-6 for c in oc["by_class"].values()), oc["by_class"]
 print(f"  grain outside the mask: unchanged 1.000, added noise {changed['grain_ratio']:.2f}")
 
+# --- composition after refinement, seams, and full-orbit summaries ---------------------------
+print("\n--- recomposition, boundary seam, orbit summaries ----------------")
+from vton2d import boundary_seam, parse_finals, recompose_run, recomposition_report, orbit_summary
+
+def alpha_paste(capture, tryon, mask):
+    a = (np.asarray(mask.convert("L"), np.float32) / 255.0)[..., None]
+    out = np.asarray(tryon.convert("RGB"), np.float32) * a + np.asarray(capture.convert("RGB"), np.float32) * (1 - a)
+    return Image.fromarray(out.clip(0, 255).astype(np.uint8))
+
+assert abs(boundary_seam(scene, scene, region) - 1.0) < 1e-6
+stepped = np.asarray(scene).astype(int); stepped[40:80, 30:60] += 60
+stepped = Image.fromarray(stepped.clip(0, 255).astype(np.uint8))
+assert boundary_seam(stepped, scene, region) > 1.5, boundary_seam(stepped, scene, region)
+print(f"  seam: unchanged 1.000, hard step pasted in {boundary_seam(stepped, scene, region):.2f}")
+
+capture_for = lambda frame: Image.open(work / f"{frame}.jpg").convert("RGB")
+assert recompose_run(writer.root, alpha_paste, capture_for=capture_for, verbose=False) == 11
+assert recompose_run(writer.root, alpha_paste, capture_for=capture_for, verbose=False) == 0
+torso = np.zeros((H, W), np.uint8); torso[30:90, 28:66] = 2
+parse_finals(writer.root, lambda img: Image.fromarray(torso), verbose=False)
+parse_finals(writer.root, lambda img: Image.fromarray(torso), source="recomposed",
+             stage="recomposed_densepose", verbose=False)
+assert len(list((writer.root / "recomposed_densepose").glob("*.png"))) == 11
+rec = recomposition_report(writer.root)
+assert rec["overall"]["n"] == 11 and set(rec["by_class"]) == {"front", "side", "back"}, rec["overall"]
+assert rec["overall"]["body_final"] == 0.0 and rec["overall"]["body_recomposed"] == 0.0, rec["overall"]
+
+summary = orbit_summary(writer.root)
+assert summary["n_frames"] == 11 and set(summary["body"]) == {"front", "side", "back"}, summary
+print("  recomposition written and parsed; per-class seam and body report; orbit summary")
+
 print("\nSMOKE TEST PASSED")
