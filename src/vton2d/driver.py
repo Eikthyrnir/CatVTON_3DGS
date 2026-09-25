@@ -346,7 +346,7 @@ def score_run(
         )
 
     result: dict = {"run_dir": Path(run_dir), "config": run["config"], "n_frames": len(names)}
-    result["consistency"] = M.consistency_series(finals, masks)
+    result["consistency"] = _adjacent_only(M.consistency_series(finals, masks), names)
     result["frames"] = names
 
     # Boundary analysis. Section 6.3 predicts that consistency is worst where the orientation
@@ -355,7 +355,8 @@ def score_run(
     views = run["manifest"].get("extra", {}).get("view_of") or infer_view_of(run_dir)
     if views:
         result["view_of"] = views
-        result["boundaries"] = _boundary_split(result["consistency"]["distances"], names, views)
+        c = result["consistency"]
+        result["boundaries"] = _boundary_split(c["distances"], c["pairs"], names, views)
 
     # The detail statistic: never report consistency without it (Section 5.2.3).
     result["garment_region"] = None
@@ -400,7 +401,7 @@ def score_run(
     if verbose:
         c = result["consistency"]
         print(f"consistency  mean {c['mean']:.4f}   max {c['max']:.4f} "
-              f"(pair {c['argmax_pair']})   over {c['n_frames']} frames")
+              f"(pair {c['argmax_pair']})   over {c['n_pairs']} adjacent pairs of {c['n_frames']} frames")
         if result.get("detail"):
             print(f"detail       mean {result['detail']['mean']:.3f}   min {result['detail']['min']:.3f}")
         else:
@@ -445,14 +446,67 @@ def backfill_view_of(run_dir: str | os.PathLike, verbose: bool = True) -> dict[s
     return views
 
 
-def _boundary_split(distances, names: Sequence[str], view_of: dict[str, str]) -> dict:
-    """Split adjacent-pair distances into those crossing an orientation class and those inside one."""
+def _orbit_index(name: str) -> int | None:
+    """The extraction index a frame is named by (``0019`` -> 19), or None for any other name."""
+    stem = Path(name).stem
+    return int(stem) if stem.isdigit() else None
+
+
+def _adjacent_only(c: dict, names: Sequence[str]) -> dict:
+    """Restrict a consistency series to pairs of frames that are adjacent in the orbit.
+
+    :func:`consistency_series` pairs consecutive entries of the list it is given. Over the full
+    orbit those are neighbouring views. A run over an arc also holds the two reference frames, which
+    :func:`run_orbit` always generates, and sorted by name each reference lands next to one end of
+    the arc, several frames away from it. Such a pair is not two adjacent views, yet it would enter
+    the mean, the worst pair and the boundary split as though it were. Two frames are adjacent when
+    their extraction indices differ by one; a pair whose names are not indices is kept.
+
+    Adds ``pairs`` (index pairs into `names`, one per distance), ``n_pairs`` and ``dropped_pairs``.
+    """
+    import numpy as np
+
+    skipped = set(c["skipped_frames"])
+    kept = [i for i in range(len(names)) if i not in skipped]
+    pairs, dist, dropped = [], [], []
+    for k, d in enumerate(c["distances"]):
+        a, b = kept[k], kept[k + 1]
+        ia, ib = _orbit_index(names[a]), _orbit_index(names[b])
+        if ia is not None and ib is not None and ib - ia != 1:
+            dropped.append((names[a], names[b]))
+            continue
+        pairs.append((a, b))
+        dist.append(d)
+    if not dist:
+        raise ValueError("no two frames of this set are adjacent in the orbit")
+
+    d = np.asarray(dist, dtype=np.float64)
+    return {
+        **c,
+        "distances": d,
+        "pairs": pairs,
+        "n_pairs": len(pairs),
+        "dropped_pairs": dropped,
+        "mean": float(d.mean()),
+        "max": float(d.max()),
+        "median": float(np.median(d)),
+        "p90": float(np.percentile(d, 90)),
+        "argmax_pair": pairs[int(d.argmax())],
+    }
+
+
+def _boundary_split(distances, pairs: Sequence[tuple[int, int]], names: Sequence[str],
+                    view_of: dict[str, str]) -> dict:
+    """Split adjacent-pair distances into those crossing an orientation class and those inside one.
+
+    `pairs` gives, for each distance, the indices into `names` of the two frames it compares.
+    """
     import numpy as np
 
     edges, interior = [], []
-    for i in range(len(distances)):
-        a, b = view_of.get(names[i]), view_of.get(names[i + 1])
-        (edges if (a and b and a != b) else interior).append(i)
+    for k, (i, j) in enumerate(pairs):
+        a, b = view_of.get(names[i]), view_of.get(names[j])
+        (edges if (a and b and a != b) else interior).append(k)
 
     def stat(idx):
         if not idx:
@@ -465,7 +519,7 @@ def _boundary_split(distances, names: Sequence[str], view_of: dict[str, str]) ->
         "boundary": b,
         "interior": it,
         "ratio": (b["mean"] / it["mean"]) if (b and it and it["mean"] > 0) else None,
-        "boundary_pairs": [(names[i], names[i + 1], float(distances[i])) for i in edges],
+        "boundary_pairs": [(names[pairs[k][0]], names[pairs[k][1]], float(distances[k])) for k in edges],
     }
 
 
@@ -521,6 +575,9 @@ def report_run(run_dir: str | os.PathLike, garment_for=None, save: bool = True,
     if views:
         edge = f"  ({views.get(fa,'?')} -> {views.get(fb,'?')})"
     print(f" worst pair  {fa} -> {fb}{edge}")
+    print(f" over {c['n_pairs']} pairs of adjacent frames")
+    if c["dropped_pairs"]:
+        print(f" not adjacent, left out: " + ", ".join(f"{a}->{b}" for a, b in c["dropped_pairs"]))
     if c["skipped_frames"]:
         print(f" skipped {len(c['skipped_frames'])} frame(s) with an empty mask")
 
@@ -639,6 +696,8 @@ def compare_runs(
         for axis in axes:
             row[axis] = cfg.get(axis, _CONFIG_DEFAULTS.get(axis))
         row["n"] = res["n_frames"]
+        row["n_pairs"] = res["consistency"]["n_pairs"]
+        row["dropped_pairs"] = res["consistency"]["dropped_pairs"]
         row["consistency_mean"] = res["consistency"]["mean"]
         row["consistency_max"] = res["consistency"]["max"]
         row["detail_mean"] = (res.get("detail") or {}).get("mean")
@@ -690,6 +749,12 @@ def compare_runs(
 
     if verbose:
         _print_table(rows, axes)
+        scored = [r for r in rows if "error" not in r]
+        if scored:
+            dropped = sorted({p for r in scored for p in r["dropped_pairs"]})
+            print(f"\nconsist/worst/bnd over {scored[0]['n_pairs']} pairs of adjacent frames"
+                  + (f"; not adjacent, left out: " + ", ".join(f"{a}->{b}" for a, b in dropped)
+                     if dropped else ""))
     return rows
 
 

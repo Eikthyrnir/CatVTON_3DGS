@@ -438,4 +438,22 @@ summary = orbit_summary(writer.root)
 assert summary["n_frames"] == 11 and set(summary["body"]) == {"front", "side", "back"}, summary
 print("  recomposition written and parsed; per-class seam and body report; orbit summary")
 
+print("\n--- consistency over adjacent frames only -------------------------")
+from vton2d.driver import _adjacent_only, _boundary_split
+
+# An arc run: frames 0019-0022 plus two references sorted in at either end, one empty-mask frame.
+names = ["0011", "0019", "0020", "0021", "0022", "0041"]
+series = {"distances": np.array([0.9, 0.1, 0.8, 0.95]), "skipped_frames": [3],
+          "mean": 0.0, "max": 0.0, "median": 0.0, "p90": 0.0, "argmax_pair": (0, 1), "n_frames": 5}
+adj = _adjacent_only(series, names)
+assert adj["pairs"] == [(1, 2)], adj["pairs"]               # 0020 -> 0022 bridges the empty frame
+assert adj["dropped_pairs"] == [("0011", "0019"), ("0020", "0022"), ("0022", "0041")], adj["dropped_pairs"]
+assert adj["n_pairs"] == 1 and abs(adj["mean"] - 0.1) < 1e-12 and adj["argmax_pair"] == (1, 2)
+split = _boundary_split(adj["distances"], adj["pairs"], names, {"0019": "front", "0020": "side"})
+assert split["boundary_pairs"] == [("0019", "0020", 0.1)] and split["interior"] is None, split
+full = _adjacent_only({**series, "distances": np.array([0.9, 0.1, 0.2, 0.8, 0.95]),
+                       "skipped_frames": []}, [f"{i:04d}" for i in range(6)])
+assert full["n_pairs"] == 5 and not full["dropped_pairs"]  # a contiguous orbit loses nothing
+print("  reference and gap pairs left out; boundary split follows the kept pairs")
+
 print("\nSMOKE TEST PASSED")
